@@ -237,3 +237,45 @@ or set -e will silently abort mid-script with no error output at all.
   lesson above - a clean "no matches" run must not abort the script
 - Polled: throttled every 3s (transient brownouts are quick), oom-events
   every 15s (not time-critical)
+
+## Phase 8e — Dashboard: refresh-latency fix + fail2ban/zram/validate/events/long-trends
+
+**Performance root cause found:** dashboard refresh "taking a few seconds"
+traced to `/api/updates/check` running `apt-get update` synchronously on
+every single page load - a multi-second network call that, with waitress's
+small thread pool, could stall other API calls on the same page load.
+Fix: served from a cache refreshed by a background thread every 30min; the
+CHECK button now hits a new `/api/updates/recheck` endpoint for an
+explicit live check instead. Same root-cause class as the proton-off
+pipefail bug in Phase 7d - a slow/blocking call sitting where the rest of
+the app follows a strict cache-then-serve pattern.
+
+**Second latency contributor:** Chart.js (204KB, the single biggest static
+asset) was a render-blocking `<script>` in `<head>` on every page load
+regardless of which tab was open. Now lazy-loaded only on first visit to
+the System tab; the vendored file also gets a 1-year cache header (app.js/
+style.css keep default revalidation since those still change often).
+
+**New features, same session:**
+- Fail2ban ban-list card + unban button (helper: fail2ban-banned,
+  fail2ban-unban) - SSH is still password-auth (Phase 1), so fail2ban is
+  the real front line, not just a status light
+- Config-validate-before-restart for AdGuard/Unbound (helper:
+  validate-config): restarting either now runs its config check first and
+  blocks the restart on failure - directly closes the Phase 7a gap where a
+  bad manual YAML edit broke auth twice because nothing validated before
+  restarting. Needs PyYAML present on the Pi for the AdGuard check
+  (`python3 -c "import yaml"`) - not yet confirmed installed on this image
+- Zram compression ratio (helper: zram-stats) folded into the existing
+  SWAP tile instead of a new card
+- oom-events broadened into a unified `system-events` helper action -
+  supersedes Phase 8d's standalone MEMORY EVENTS card. SYSTEM EVENTS now
+  also covers undervoltage/voltage-normalised transitions and
+  network-failover watchdog log lines, merged and time-sorted in one place
+- Persistent long-term trends: 5min-downsampled temp/cpu/ram/swap history
+  in a local sqlite file (30-day retention - negligible size against this
+  card's 26GB free), new PERFORMANCE TRENDS (7 DAYS) chart on System tab
+
+Verified with a Flask test-client smoke test (CSRF gate, cache-header
+override, input validation, cached vs. live update-check, new endpoint
+shapes) - no real Pi available in the dev environment for this batch.
