@@ -477,6 +477,48 @@ endpoint shape) plus a full regression pass confirming the
 constant-to-dict refactor didn't break the existing alert transition
 logic. Not yet exercised on the real device.
 
+## Phase 8j — Fixed real-device issues from 8i, UI polish
+
+Two bugs found immediately on first real use of the new tabs:
+
+- **"-- No entries --" showing up as fake events.** journalctl prints
+  this exact literal line when a `-g` grep query matches nothing (older
+  systemd versions) - SYSTEM EVENTS and the SECURITY tab's SSH auth log
+  were both passing this straight through as if it were a real event.
+  Filtered out at the source (`grep -v -- '^-- No entries --$'`) in both
+  `system-events` and `ssh-auth-log`.
+- **LOGS tab empty for AdGuard/Unbound/nginx/UFW/Fail2Ban** (only
+  Tailscale and pi-control itself showed anything). Root cause: most of
+  these services don't route their real logs through the systemd journal
+  at all - nginx and fail2ban write their own log files, AdGuard Home has
+  its own log file, unbound can log under a bare `unbound` syslog tag
+  rather than its unit name depending on how it forks. `journalctl -u X`
+  only ever sees stdout/stderr, so there was frequently nothing there to
+  find - not a dashboard bug so much as a wrong assumption about where
+  each service actually logs. `service-logs` now falls back in order:
+  `journalctl -u unit` -> (unbound only) `journalctl -t unbound` -> known
+  log file per service (`AdGuardHome.log`, `nginx/error.log`,
+  `fail2ban.log`) -> a clear "nothing found" message instead of a silent
+  blank box. Verified the full fallback chain with a mocked-journalctl
+  test harness (5 scenarios: journalctl empty->file fallback, journalctl
+  empty->syslog-tag also empty->generic message, real journalctl data,
+  no-fallback-defined unit, rejected unit).
+- Vaultwarden logs are expected to stay empty until it's actually
+  installed - not a bug, per the standing note from earlier in this doc.
+
+**UI polish**, all requested together after the first real look at the
+new tabs:
+- Proton kill-switch warning now renders as a bordered `alert-banner`
+  (background tint + border), hidden via `display:none` when inactive
+  instead of leaving an empty line - previously it was plain colored text
+  that blended into the card
+- ALERTS tab's SAVE button now uses the same `toast()` notification every
+  other action in the app already uses, instead of a one-off inline
+  status line (removed the now-dead element)
+- Added manual REFRESH buttons to ALERT HISTORY and the SECURITY tab's
+  fail2ban summary, since neither auto-polls by design - previously the
+  only way to refresh was switching tabs away and back
+
 ## Deploy — pi-control dashboard (standing reference)
 
 **Preferred: one command.** `pi-control/deploy-pi-control.sh` now ships
