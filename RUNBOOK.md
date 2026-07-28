@@ -222,3 +222,18 @@ Fix: append `|| true` after every grep-based detection in this script, so
 Lesson: under `set -e -o pipefail`, any grep/pipeline that can legitimately
 return "no match" as a normal expected state needs an explicit `|| true`,
 or set -e will silently abort mid-script with no error output at all.
+
+## Phase 8d — Dashboard: undervoltage/throttle flag + OOM-kill watch
+- New helper actions: `throttled` (vcgencmd get_throttled) and `oom-events`
+  (journalctl -k grep for OOM-killer lines, last 24h)
+- Overview tab: POWER tile next to SWAP - separates "active right now" from
+  "occurred since boot" (vcgencmd bit layout: bits 0-3 current state, bits
+  16-19 since-boot), so a brownout that already cleared doesn't get lost
+- MEMORY EVENTS card lists any kernel OOM kills in the last 24h - swap
+  already running ~30% used at idle on this Zero 2 W (425MB RAM / 424MB
+  zram swap) made this worth having ahead of RAM pressure actually causing
+  a kill, not just after
+- oom-events journalctl call gets `|| true`, per the Phase 7d pipefail
+  lesson above - a clean "no matches" run must not abort the script
+- Polled: throttled every 3s (transient brownouts are quick), oom-events
+  every 15s (not time-critical)
