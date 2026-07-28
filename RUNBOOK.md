@@ -391,6 +391,39 @@ confirmed correctness of the transition logic itself instead.
   to force a genuine electrical undervoltage condition on demand. Both
   covered by the same unit-tested transition logic as everything else.
 
+## Phase 8h — Dashboard: service-down, kill-switch, Proton-stale, SD-health alerts
+
+Extended Phase 8g's alerting to four more transitions, same seed-at-
+startup / alert-on-change-only pattern as everything already there:
+- **Service down/up** - any monitored unit (AdGuard, Unbound, Vaultwarden,
+  Tailscale, nginx, UFW, fail2ban) going inactive or recovering, batched
+  into one message if several change in the same poll. The single most
+  obviously-missing signal before this - previously you'd only find out
+  a service crashed by opening the dashboard.
+- **Proton kill-switch** - the same condition already shown as a passive
+  NET tab warning (Phase 8f) now also fires a Telegram alert, checked in
+  `_sample_net` right where both underlying values are already available
+- **Proton handshake staleness** - alerts if a nominally-"up" Proton
+  connection's last handshake exceeds 5 min (`STALE_HANDSHAKE_S`) -
+  `wg-quick` doesn't tear the interface down on peer unreachability, so
+  `up` can stay true long after the tunnel actually died
+- **SD card health** - extended the existing `system-events` grep
+  pattern (already used for OOM/undervoltage/failover) to also catch
+  mmcblk/Buffer-I/O/EXT4-fs kernel log lines - no new dependency, SD
+  cards don't expose SMART data, and a read-only remount is the classic
+  early-failure symptom. Reuses the same fresh-line diffing already
+  computed for OOM detection, just a second disjoint filter - no new
+  helper action needed.
+
+Verified with the same deterministic test harness as Phase 8g (patches
+`time.sleep` to break out after one loop iteration, mocks the underlying
+data functions) - onset, no-duplicate-while-ongoing, and recovery for
+all four conditions, all passed. Not yet confirmed on the real device -
+service-down/up and kill-switch are easy to trigger deliberately
+(`sudo systemctl stop <unit>` / toggling Proton with an exit node
+advertised) whenever that's worth doing; SD-health and Proton-staleness
+are harder to safely force the same way the OOM/power gap was in 8g.
+
 ## Deploy — pi-control dashboard (standing reference)
 
 Run every time a new `pi-control.tar.gz` is pulled onto the Pi:
