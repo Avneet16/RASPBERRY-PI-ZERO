@@ -560,3 +560,63 @@ complexity in an otherwise-idempotent script):
 sudo cp /opt/pi-control/picontrol.service /etc/systemd/system/picontrol.service
 sudo systemctl daemon-reload
 ```
+
+## Phase 8k — Dashboard: de-duplicate Overview, peer IPs, egress fix, real log paths
+
+**Consolidated cards that had ended up duplicated across tabs** once
+ALERTS/LOGS/SECURITY existed:
+- TELEGRAM ALERTS removed from Overview - SEND TEST ALERT moved to a new
+  TELEGRAM TEST card on the ALERTS tab (which already has history +
+  thresholds). `testTelegram()` now uses `toast()` like every other
+  action instead of a dedicated status element.
+- FAIL2BAN BANS removed from Overview - the banned-IP list + unban button
+  moved to the SECURITY tab, next to the jail summary already there.
+  `/api/security` now also returns `fail2ban_banned` (reused from the
+  existing CACHE value, no new subprocess call). `_overview_snapshot()`
+  no longer carries either field, since nothing reads them from Overview
+  anymore.
+
+**Tailscale peers** now show their Tailscale IP next to hostname
+(`TailscaleIPs[0]` from `tailscale status --json`).
+
+**Egress check fixed** - it never worked. Root cause: `--interface
+tailscale0` uses SO_BINDTODEVICE for curl's *entire* request, including
+its own DNS lookup - but that lookup goes to 127.0.0.1:53 (AdGuard),
+unreachable once the socket is bound to tailscale0 instead of loopback,
+so the request died before ever reaching the HTTPS part. Fixed by
+resolving via the normal unrestricted resolver first (`getent ahostsv4`),
+then handing curl the IP directly via `--resolve` so it never does its
+own DNS lookup over the bound interface. Also forces `-4` on both the
+direct and exit-node checks - Proton is IPv4-only, so an IPv6 "direct"
+result was never a meaningful comparison. Caught a second real bug while
+*testing* this fix: the `getent` pipeline needed `|| true` (same pipefail
+class as the Phase 7d lesson) - without it, `set -e` killed the whole
+action silently whenever DNS resolution failed, never reaching the
+fallback message. Found by tracing with `bash -x` against a mocked
+`getent`/`curl`, not by inspection alone.
+
+**LOGS tab fallback paths corrected against the real Pi**, replacing
+guesses from Phase 8j with confirmed values (systemctl cat, config
+greps, file listings, journalctl per service):
+- AdGuardHome: unit sets `StandardOutput`/`StandardError=journal`
+  explicitly, no separate log file exists - the wrong file-fallback
+  guess was removed; an empty journal here is genuinely quiet operation,
+  not a wrong-path bug
+- unbound: no `logfile:`/`use-syslog:` configured, so default verbosity
+  only logs startup/errors - quiet, error-free operation is expected to
+  produce nothing; message now explains this and how to opt into a log
+  file if wanted
+- nginx: confirmed real files at `/var/log/nginx/{error,access}.log`,
+  but `error.log` was 0 bytes (healthy = no errors) while `access.log`
+  had real traffic - fallback now tries multiple files in priority order
+  instead of reporting "nothing found" when the service is demonstrably
+  working
+- ufw: confirmed purely the oneshot rule loader as already documented -
+  added a kernel-log fallback (`journalctl -k -g '\[UFW'`) since real
+  firewall activity, if `ufw logging on` is enabled, lands there instead
+  of on the unit itself
+- fail2ban: confirmed `/var/log/fail2ban.log` is the real logtarget with
+  real content - original fallback was already correct, no change needed
+
+No deploy changes for this batch - standard `bash
+~/pi-control/deploy-pi-control.sh`.
