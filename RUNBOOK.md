@@ -429,6 +429,54 @@ confirmed on hardware - service-down/up is easy to trigger deliberately
 doing; SD-health and Proton-staleness are harder to safely force the same
 way the OOM/power gap was in 8g.
 
+## Phase 8i — Dashboard: ALERTS, LOGS, and SECURITY tabs
+
+Three new tabs after TERM, each big enough to deserve its own space
+rather than another Overview card.
+
+**ALERTS tab:**
+- Alert history - every Telegram alert ever sent is now persisted (same
+  trends.db sqlite file, new `alert_history` table, capped at the 200
+  most recent rows) and browsable, not just the single most-recent one
+  on Overview's TELEGRAM ALERTS card
+- Live-tunable thresholds - `TEMP_ALERT_C`/`DISK_ALERT_PCT`/
+  `STALE_HANDSHAKE_S` are no longer hardcoded constants. They're now
+  `ALERT_THRESHOLDS`, loaded from a persisted `settings` table at startup
+  (same db file again), editable straight from the dashboard, effective
+  on the very next sampling poll - no code edit or redeploy required.
+  Directly closes the friction hit testing Phase 8g, where tuning a
+  threshold meant hand-editing `app.py` and restarting twice (once to
+  set a test value, once to revert)
+
+**LOGS tab:** general-purpose log viewer for any monitored service (or
+pi-control itself) - pick a unit + line count, tap load. New whitelisted
+`service-logs` helper action, explicit case-match on allowed units, no
+arbitrary `journalctl -u` access.
+
+**SECURITY tab:**
+- Fail2ban summary - total/currently failed and banned counts per jail,
+  complementing (not duplicating) the currently-banned IP list already
+  on Overview
+- UFW rule list (`ufw status verbose`) - previously only active/inactive
+  was visible, not what's actually allowed through
+- SSH auth log, last 24h (accepted/failed/invalid-user) - relevant given
+  SSH is still password-auth by deliberate choice (Phase 1)
+
+**Frontend note:** added an `AUTO_POLL_TABS` list so the 5s auto-refresh
+only applies to the original 4 tabs (over/sys/net/disk) - alerts/logs/
+security load once per tab switch instead, so a log view's scroll
+position or an in-progress threshold edit never gets silently reset by a
+background poll. Tabbar also switched from equal 1/8-width flex shares
+(illegible at 8 tabs on a phone) to horizontal scroll with a sane
+per-button minimum width.
+
+Verified with a Flask test-client suite covering all new endpoints
+(threshold get/set with bounds validation and sqlite persistence, alert
+history round-trip, logs unit whitelist + line clamping, security
+endpoint shape) plus a full regression pass confirming the
+constant-to-dict refactor didn't break the existing alert transition
+logic. Not yet exercised on the real device.
+
 ## Deploy — pi-control dashboard (standing reference)
 
 **Preferred: one command.** `pi-control/deploy-pi-control.sh` now ships
