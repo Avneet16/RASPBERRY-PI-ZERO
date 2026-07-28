@@ -418,15 +418,34 @@ startup / alert-on-change-only pattern as everything already there:
 Verified with the same deterministic test harness as Phase 8g (patches
 `time.sleep` to break out after one loop iteration, mocks the underlying
 data functions) - onset, no-duplicate-while-ongoing, and recovery for
-all four conditions, all passed. Not yet confirmed on the real device -
-service-down/up and kill-switch are easy to trigger deliberately
-(`sudo systemctl stop <unit>` / toggling Proton with an exit node
-advertised) whenever that's worth doing; SD-health and Proton-staleness
-are harder to safely force the same way the OOM/power gap was in 8g.
+all four conditions, all passed.
+
+**Kill-switch confirmed on the real device** the same session it shipped -
+got the exact expected Telegram alert ("exit node active, Proton is OFF -
+peer traffic is going direct") the first time the condition occurred
+naturally. Service-down/up, SD-health, and Proton-staleness not yet
+confirmed on hardware - service-down/up is easy to trigger deliberately
+(`sudo systemctl stop <unit>` on something safe) whenever that's worth
+doing; SD-health and Proton-staleness are harder to safely force the same
+way the OOM/power gap was in 8g.
 
 ## Deploy — pi-control dashboard (standing reference)
 
-Run every time a new `pi-control.tar.gz` is pulled onto the Pi:
+**Preferred: one command.** `pi-control/deploy-pi-control.sh` now ships
+inside the tarball and runs the whole sequence below in order:
+```
+bash ~/pi-control/deploy-pi-control.sh
+```
+It re-extracts `~/pi-control.tar.gz` (or `.tar`) itself, so nothing needs
+to be extracted by hand first - just make sure the fresh archive is at
+`~/pi-control.tar.gz` before running it. Since the script itself lives
+inside the tarball, the very first time it's used requires one manual
+extraction to bootstrap it onto the Pi (see the manual sequence below);
+every deploy after that just re-runs the same script path, which carries
+itself forward automatically with each new tarball drop.
+
+**Manual sequence** (what the script above actually runs - useful as a
+fallback for debugging, or for the one-time bootstrap extraction):
 ```
 sudo systemctl stop picontrol
 tar xzf ~/pi-control.tar.gz -C ~/ 2>/dev/null || tar xf ~/pi-control.tar -C ~/
@@ -444,7 +463,9 @@ in-place from `/opt/pi-control`.
 
 One-off extra step, only when a change specifically touches
 `picontrol.service` itself (called out explicitly whenever that happens -
-last needed for Phase 8f's `--threads=8`):
+last needed for Phase 8f's `--threads=8`; not handled by the deploy
+script, since it's rare enough not to be worth the daemon-reload
+complexity in an otherwise-idempotent script):
 ```
 sudo cp /opt/pi-control/picontrol.service /etc/systemd/system/picontrol.service
 sudo systemctl daemon-reload
