@@ -1,0 +1,224 @@
+# Pi Runbook
+
+## Phase 0 — Backup
+Full backup of prior system taken before wipe: pi-backup-full.tar.gz
+Contains: custom scripts, systemd units, nginx configs+certs, AdGuard config,
+Unbound config, Vaultwarden data (db.sqlite3 verified via PRAGMA integrity_check = ok),
+Redis dump, crontabs, ufw rules, Tailscale state.
+Stored off-device on phone + additional backup location.
+Old 16GB SD card kept as physical fallback (untouched, labeled).
+
+## Phase 1 — Fresh OS
+Raspberry Pi OS Lite (32-bit/armhf), Debian 13 "trixie"
+Flashed via Raspberry Pi Imager to 32GB SanDisk card.
+SSH enabled, password authentication (deliberate choice — easier to
+manage during rebuild; revisit key-only auth once stable).
+WiFi credentials preloaded (for AP-failover use later, NOT as a second
+LAN client — see Phase 3 notes).
+Raspberry Pi Connect: explicitly declined/masked (redundant with Tailscale,
+extra attack surface for no new capability here).
+
+## Phase 2 — Base hardening
+- fail2ban installed, sshd jail active
+- ufw installed: default deny incoming / allow outgoing, port 22/tcp allowed
+- unattended-upgrades configured
+- rpi-connect-lite (auto-installed via apt) masked
+
+## Phase 3 — Networking (in progress)
+[to be filled in]
+
+## Services & ports (running log)
+| Service | Port | Interface scope | Notes |
+|---|---|---|---|
+| SSH | 22 | all | password auth for now |
+
+## Credentials & secrets (locations, not values)
+- Telegram bot token: pi-tele.sh / telegram-send.sh (restore from backup)
+- Vaultwarden data: /opt/vaultwarden (restore from backup, integrity-verified)
+- nginx basic auth: .htpasswd, .htpasswd-adguard (restore or regenerate)
+
+## Phase 3 — Networking (verified)
+- systemd-networkd not present/conflicting on fresh image; NetworkManager (netplan renderer) is sole network manager
+- eth0: primary, DHCP, single default route
+- wlan0: no longer dual-active client on same subnet as eth0
+- 3-tier failover script: /usr/local/bin/network-failover.sh
+  1. eth0 (primary)
+  2. wlan0 client, known networks (auto via NetworkManager)
+  3. wlan0 AP "Pi-Failover" (192.168.50.1/24, connection name wlan0-ap) - last resort, for
+     emergency management access AND as a portal to add new WiFi creds when relocating
+- Tested: eth0-down -> wlan0 client reconnect (pass); eth0-up -> wlan0 disconnect (pending verification)
+- Note: standalone hostapd.conf / dnsmasq.d/wlan0-ap.conf are unused leftovers -
+  AP is driven entirely via the wlan0-ap NetworkManager connection profile instead
+- Not yet wired to a timer - currently manual-only via network-failover.sh
+
+## Phase 3 — Networking (fully verified)
+- Forward path tested: eth0 down -> wlan0 auto-reconnects to known network (confirmed 10:03)
+- Reverse path tested: eth0 up -> wlan0 client disconnects, single default route restored (confirmed 10:05)
+- Both directions produce clean logger output via `logger -t network-failover`
+
+## Phase 4a — Unbound (recursive resolver)
+- Restored tuned config from backup (QNAME minimization, DNSSEC hardening,
+  Pi-tuned cache sizes) - config verified sound, not clutter as initially assumed
+- Restored remote-control cert pair for unbound-control on :8953
+- Root hints + DNSSEC trust anchor regenerated fresh (not restored - these are
+  meant to be system-generated, not carried over)
+- Decision: stayed with root hints (full recursion) over Quad9-over-TLS forwarding
+  - Benchmarked both: root hints cold ~300-670ms, Quad9-TLS cold ~260-270ms but
+    failed on 2/4 test queries (TLS session drops)
+  - Warm cache: Unbound repeat query = 0ms; Quad9 test showed no improvement
+    (artifact of kdig opening a fresh TLS session each call, not representative
+    of Unbound-as-client behavior in production)
+  - Chose root hints: matches the original privacy goal (no single third party
+    sees full DNS history), latency cost is one-time per cache TTL window
+- Listening on 127.0.0.1:5335 only - not exposed to network, AdGuard will forward here
+
+## Correction — Phase 3 dnsmasq cleanup
+- Standalone dnsmasq (installed Phase 3 for the original hostapd+dnsmasq AP plan,
+  later superseded by driving AP purely via NetworkManager's ipv4.method=shared)
+  was left RUNNING despite being `disable`d - disable only prevents future boot
+  starts, doesn't stop an already-running process
+- Was silently squatting on 0.0.0.0:53, conflicting with AdGuard Home setup
+- Fixed: explicitly `stop` + `mask` both dnsmasq and hostapd
+- Lesson: after `systemctl disable` on a service you don't want, always also
+  check `systemctl status` / `ss -tulnp` to confirm it's not still live from
+  its initial apt-install auto-start
+
+## Phase 4b — AdGuard Home
+- Fresh install via official script, /opt/AdGuardHome
+- Admin panel locked to 127.0.0.1:3000 (loopback only) - wizard defaults to
+  0.0.0.0:80 which would have exposed unauthenticated admin panel to LAN;
+  caught and corrected before any real exposure
+- DNS listening 0.0.0.0:53 (intentional - needs to serve the whole LAN)
+- Upstream set to 127.0.0.1:5335 (Unbound) - verified via dashboard: 100% of
+  queries routed there, ~146ms average response time
+- Fixed system-level DNS leak: Pi's own /etc/resolv.conf was still pointing at
+  router/ISP DNS via NetworkManager auto-config, bypassing AdGuard entirely -
+  corrected via `nmcli ... ipv4.dns 127.0.0.1 ipv4.ignore-auto-dns yes` (+ ipv6
+  equivalent to stop IPv6 leak too)
+- Blocklists not yet re-added (declined restore of old config, rebuilding fresh)
+- ufw: port 53 opened for eth0 + wlan0 only, not global
+- Access to admin panel currently via SSH tunnel only (ssh -L 3000:localhost:3000) -
+  temporary until nginx reverse proxy is rebuilt in a later phase
+
+## Phase 6 — Proton WireGuard geo-exit
+- Config built correctly first time with table-52 fix already in place (from
+  Phase 5/earlier debugging): carve-out rule (to 100.64.0.0/10 -> table 52,
+  priority 50) sits above the catch-all (from 100.64.0.0/10 -> table 200,
+  priority 100) - SSH/dashboards over Tailscale unaffected by Proton state
+- Caught and fixed: IPv6 leak. Proton tunnel is IPv4-only (AllowedIPs = 0.0.0.0/0
+  only), but Tailscale's exit-node feature routes both v4 and v6 by default with
+  no per-family toggle. Without a fix, IPv6 traffic from exit-node clients was
+  bypassing Proton entirely and leaking real ISP/location via eth0's IPv6.
+- Fix: net.ipv6.conf.all.forwarding set to 0 in /etc/sysctl.d/99-tailscale.conf -
+  IPv6 now fails closed for exit-node clients instead of leaking; IPv4 traffic
+  unaffected and continues through Proton correctly
+- Verified: curl -4 ifconfig.me (via phone, exit-node=Pi) shows Proton IP;
+  curl -6 ifconfig.me fails/times out as expected
+- Toggle workflow unchanged: `sudo wg-quick up/down proton`, manual only,
+  not enabled at boot
+
+## Correction — Phase 7a, AdGuard's own auth removed
+- Decision: removed AdGuard Home's built-in user auth entirely, relying on
+  nginx basic auth as the sole gate (justified: AdGuard binds 127.0.0.1:3000
+  only, unreachable except through nginx; adding AdGuard's own login was
+  redundant and its 15-min lockout-on-disk was actively counterproductive
+  during setup/testing)
+- If defense-in-depth is wanted later, re-add via the validated process
+  above (htpasswd -B -n, edit yaml, validate with python3 yaml.safe_load
+  BEFORE restarting - this exact sequence broke twice from manual edits)
+
+## Correction — Phase 7a, actual root cause of the auth loop
+- Root cause: `sudo htpasswd -c ...` recreate command was suggested multiple
+  times during troubleshooting but not actually executed until the final
+  attempt - .htpasswd-adguard still had the OLD "admin:" entry the whole
+  time, so every "anon" login attempt correctly failed (user genuinely
+  didn't exist in the file yet)
+- Lesson: when a fix doesn't take effect, verify the file's actual current
+  contents directly (`cat` the htpasswd/config file) before troubleshooting
+  further upstream - don't assume a previously-given command was run
+- Final working state: nginx basic auth username "anon", AdGuard's own
+  login removed (nginx is sole auth gate - see prior correction)
+- Verified: phone -> Tailscale (100.97.48.99:9442) -> nginx auth -> AdGuard
+  dashboard, working end-to-end
+
+## Phase 8 (partial) — Swap via zram
+- Installed zram-tools, /etc/default/zramswap: ALGO=lz4, PERCENT=50 (~211MB
+  swap on a 424MB Pi)
+- Gotcha: first `systemctl enable --now` failed with "mkswap: /dev/zram0 is
+  mounted" - a stale/partially-initialized zram0 device was already active
+  as swap when the service tried to configure it fresh
+- Fix: `sudo swapoff /dev/zram0` + `echo 1 | sudo tee /sys/block/zram0/reset`
+  to force a clean slate, then `systemctl restart zramswap.service`
+- Verified survives a real reboot, not just this session
+- Dashboard now surfaces swap % and MB used/total on the Overview tab
+
+## Incident resolved — remote lockout root cause (full writeup)
+
+Two independent bugs combined to cause the lockout:
+
+**Bug 1 — AdGuard silently broke AP mode.**
+AdGuard's `bind_hosts: 0.0.0.0` wildcard-bound port 53 on every address,
+including ones assigned later. When wlan0-ap activated and got 192.168.50.1,
+NetworkManager's internal dnsmasq tried to bind DNS on that same address and
+failed ("Address already in use"), causing wlan0-ap to activate then die on
+~30s loop, over and over. This is why AP mode was so unreliable/hard to
+connect to during the actual incident.
+Fix: static IP for eth0 (192.168.1.8), AdGuard bind_hosts restricted to
+127.0.0.1 / 192.168.1.8 / 100.97.48.99 instead of 0.0.0.0.
+
+**Bug 2 — the actual root cause of why wlan0-client reconnect kept failing.**
+`nmcli device connect wlan0` (by device, not connection name) picks "the best
+available connection" using internal heuristics that favor whichever
+connection was most recently activated. Because wlan0-ap kept getting
+activated repeatedly (testing, then the real incident), its timestamp stayed
+newer than the home WiFi profile's — so "connect the device" kept silently
+choosing the AP profile over the real home network, even with strong signal
+and correct credentials. This was likely the root cause going back to the
+very first test.
+Fix: always activate by explicit connection name
+(`nmcli connection up netplan-wlan0-Airtel_nish_4886`), never by device alone.
+Updated in network-failover.sh at both call sites.
+
+**Bug 3 (design gap, also fixed this session) — no retry once AP latched.**
+Original script only rechecked for eth0 returning once in AP mode; never
+retried the wifi-client path on its own. Fixed with a periodic retry
+(every 5 min while in AP mode) using a timestamp file at
+/run/network-failover-last-wifi-retry.
+
+**Also fixed this session:** Telegram alerting wired into the watchdog's
+log() function - confirmed working on a real failover event this time.
+
+**Verified end-to-end**, real eth0-down test, with the actual fix in place:
+eth0 down -> wlan0 correctly connects to real home WiFi (not AP) -> Telegram
+alert fires -> eth0 back up -> wlan0 disconnects, single default route restored.
+
+**Process lesson:** should have armed an `at` auto-revert before the FIRST
+live network test while remote, not just later ones. New standing rule:
+no live network changes while remote, full stop, until a smart WiFi plug is
+in place for guaranteed remote power-cycle capability.
+
+## Phase 7d — Multi-server Proton switching
+- Each server gets its own config: /etc/wireguard/proton-<name>.conf, same
+  table-52/IPv6-leak fixes baked into every one (us, romania, swiss configured
+  so far)
+- Helper actions: proton-list, proton-status (now reports which server, not
+  just up/down), proton-switch <name>, proton-off
+- Dashboard Proton card redesigned: per-server CONNECT/SWITCH TO/ACTIVE
+  buttons instead of a single toggle, since only one server can hold table
+  200's route at a time - switching means clean teardown of whichever is
+  active before bringing up the new one
+
+**Bug found and fixed:** the helper script has `set -euo pipefail`. Several
+proton-* actions did `... | grep '^proton-' | ...` to detect whether
+anything was currently up. When NOTHING is up (the normal "off" state),
+grep finding no match returns exit 1 - which pipefail propagates and
+set -e treats as fatal, silently killing the whole script before it ever
+reached the `wg-quick up` line. Result: switching between two already-active
+servers worked fine (grep always matched something), but turning Proton ON
+from a fully-off state silently failed every time - exit code 1, zero output,
+nothing useful to debug from the dashboard side alone.
+Fix: append `|| true` after every grep-based detection in this script, so
+"found nothing" is treated as a valid empty result, not a fatal error.
+Lesson: under `set -e -o pipefail`, any grep/pipeline that can legitimately
+return "no match" as a normal expected state needs an explicit `|| true`,
+or set -e will silently abort mid-script with no error output at all.
