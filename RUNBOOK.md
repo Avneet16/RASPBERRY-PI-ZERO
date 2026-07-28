@@ -369,6 +369,28 @@ polls, OOM-vs-failover-line exclusion, disk threshold, last_alert
 exposure) - no real Pi available in the dev environment for this batch,
 confirmed correctness of the transition logic itself instead.
 
+**Confirmed on-device, end to end:**
+- Fail2ban: deliberately failed several SSH logins from an external
+  device, got banned, Telegram alert fired and matched the dashboard's
+  FAIL2BAN BANS card
+- Disk + temp: temporarily raised both thresholds just above idle
+  (`TEMP_ALERT_C`/`DISK_ALERT_PCT`) so a restart seeds baseline as
+  "not yet high", then crossed them live with a CPU stress loop
+  (`yes > /dev/null &` x4) and a scratch file (`fallocate`) - both fired
+  correctly on crossing *and* on recovery, restored to 75.0/90.0
+  afterward
+- Gotcha hit during testing: setting a threshold *below* current
+  live values before restarting seeds `_init_alert_state()` as
+  already-high immediately, so no alert fires - by design (matches the
+  no-re-alert-on-restart behavior), but easy to trip over when testing;
+  the threshold has to start above the live value for a restart to seed
+  a clean "not yet high" baseline to cross
+- OOM and power/undervoltage intentionally left untested on the real
+  device - inducing a real kernel OOM kill risks the kernel picking an
+  unintended process to kill on a 425MB device, and there's no safe way
+  to force a genuine electrical undervoltage condition on demand. Both
+  covered by the same unit-tested transition logic as everything else.
+
 ## Deploy — pi-control dashboard (standing reference)
 
 Run every time a new `pi-control.tar.gz` is pulled onto the Pi:
