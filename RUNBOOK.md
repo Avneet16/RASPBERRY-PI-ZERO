@@ -279,3 +279,65 @@ style.css keep default revalidation since those still change often).
 Verified with a Flask test-client smoke test (CSRF gate, cache-header
 override, input validation, cached vs. live update-check, new endpoint
 shapes) - no real Pi available in the dev environment for this batch.
+
+## Phase 8f — Refresh-latency round 2, Proton kill-switch, Telegram fix
+
+**Confirmed on-device:** refresh is now noticeably faster after Phase 8e's
+apt-get/Chart.js fixes, but still had room - traced to the SPA pattern
+itself: every tab load starts blank ("--" placeholders) until its first
+fetch round-trips over Tailscale, even though the server answers those
+fetches instantly from cache.
+
+- Overview's data is now embedded directly into the page HTML at render
+  time (`window.__INITIAL_OVERVIEW__`, via a shared `_overview_snapshot()`
+  helper used by both `/` and `/api/overview`) - the Overview tab paints
+  with real numbers on first load with zero API round-trips. Every load
+  after the first still does a normal fetch.
+- System tab's `/api/sys` fetch no longer waits behind Chart.js + the
+  long-trends chart in a serial await chain - it now runs concurrently,
+  which matters most the first time System is opened and Chart.js's
+  204KB still needs downloading.
+- waitress-serve bumped from its default 4 threads to 8
+  (`picontrol.service` - needs `sudo cp .../picontrol.service
+  /etc/systemd/system/` + `daemon-reload` to actually take effect, unlike
+  every other file in this tarball).
+- Fixed a related latent gap: CACHE's "live" default dict was missing
+  swap_pct/swap_used_mb/swap_total_mb, which could have thrown a
+  client-side error in the ~3s window right after service start.
+
+**Proton kill-switch warning:** NET tab now shows an explicit warning if
+this Pi is offering itself as a Tailscale exit node while Proton is off -
+peer traffic goes direct instead of through the geo-exit in that state,
+easy to miss since the two systems don't know about each other.
+
+**telegram-send.sh bug found and fixed:** the script only checked curl's
+own exit code, which reflects transport-level success (DNS, connection) -
+not whether Telegram actually accepted the message. A bad bot token or
+chat ID comes back as a normal HTTP 200 with `"ok":false` in the response
+body, so the script always reported success even when nothing was
+delivered - a silent-failure class of bug, same family as the Phase 7d
+pipefail one, just at the application layer instead of the shell layer.
+Fixed to parse the actual API response; same invocation signature, so
+nothing else that calls it needs to change.
+Brought the script into this repo (`pi-control/telegram-send.sh`, deploys
+to `/usr/local/bin/telegram-send.sh`, needs `chmod +x` after copying, same
+as the helper script) since the dashboard now depends on its exit code
+being meaningful. New TELEGRAM ALERTS card + SEND TEST ALERT button on
+Overview, wired to a new fixed-message-only `telegram-test` helper action
+(never accepts arbitrary text, so it can't become a message-sending
+oracle) - confirmed working end-to-end on the real device.
+
+**Deploy sequence updated** to also copy+chmod `telegram-send.sh` on every
+deploy (same pattern as `pi-control-helper.sh`), plus the one-time
+`picontrol.service`/`daemon-reload` step above for this batch's thread
+change:
+```
+sudo systemctl stop picontrol
+tar xzf ~/pi-control.tar.gz -C ~/ 2>/dev/null || tar xf ~/pi-control.tar -C ~/
+sudo cp -r ~/pi-control/* /opt/pi-control/
+sudo cp /opt/pi-control/pi-control-helper.sh /usr/local/bin/
+sudo chmod 755 /usr/local/bin/pi-control-helper.sh
+sudo cp /opt/pi-control/telegram-send.sh /usr/local/bin/
+sudo chmod 755 /usr/local/bin/telegram-send.sh
+sudo systemctl start picontrol
+```
