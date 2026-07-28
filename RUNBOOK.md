@@ -330,7 +330,48 @@ oracle) - confirmed working end-to-end on the real device.
 **Deploy sequence updated** to also copy+chmod `telegram-send.sh` on every
 deploy (same pattern as `pi-control-helper.sh`), plus the one-time
 `picontrol.service`/`daemon-reload` step above for this batch's thread
-change:
+change. See "Deploy — pi-control dashboard" below for the standing
+command block to use going forward.
+
+## Phase 8g — Dashboard: proactive Telegram alerting on health transitions
+
+Turned five previously passive dashboard cards into an actual monitoring
+system - the background sampling threads now fire a Telegram alert the
+moment a condition newly becomes true (or clears), never on every poll,
+so a flapping issue or an ongoing one doesn't spam:
+- Undervoltage / frequency-cap / throttling - onset and recovery, off the
+  structured `_power_status()` flags (not text-parsed)
+- CPU temp crossing 75°C in either direction (`TEMP_ALERT_C`)
+- Disk usage crossing 90% on any mount, either direction (`DISK_ALERT_PCT`)
+- New fail2ban bans, batched into one message if several land in the same
+  poll window - avoids a message storm during a real credential-stuffing
+  attempt
+- New OOM kills, pulled from the existing system-events stream but
+  explicitly excluding network-failover-tagged lines (already alerted by
+  the watchdog itself) and undervoltage lines (already covered by the
+  structured power check) - avoids double-alerting the same real event
+  through two paths
+
+`ALERT_STATE` is seeded from real current conditions at startup
+(`_init_alert_state`), before the sampling loops start - a service
+restart never re-alerts for conditions that already existed before the
+dashboard came up. New internal-only `telegram-alert` helper action,
+never wired to an HTTP route (unlike `telegram-test`), so it can't be
+reached with arbitrary user input the way an API action could. TELEGRAM
+ALERTS card now shows the last alert that actually fired, separate from
+the manual test button's result.
+
+Verified with a deterministic test harness (patches `time.sleep` to break
+out after exactly one loop iteration per sampling function, walks through
+9 scenarios: no alert on steady state, alert on transition, no duplicate
+while ongoing, alert on recovery, batched fail2ban alert, dedup across
+polls, OOM-vs-failover-line exclusion, disk threshold, last_alert
+exposure) - no real Pi available in the dev environment for this batch,
+confirmed correctness of the transition logic itself instead.
+
+## Deploy — pi-control dashboard (standing reference)
+
+Run every time a new `pi-control.tar.gz` is pulled onto the Pi:
 ```
 sudo systemctl stop picontrol
 tar xzf ~/pi-control.tar.gz -C ~/ 2>/dev/null || tar xf ~/pi-control.tar -C ~/
@@ -340,4 +381,16 @@ sudo chmod 755 /usr/local/bin/pi-control-helper.sh
 sudo cp /opt/pi-control/telegram-send.sh /usr/local/bin/
 sudo chmod 755 /usr/local/bin/telegram-send.sh
 sudo systemctl start picontrol
+```
+`picontrol-helper.sh` and `telegram-send.sh` both need the explicit
+copy+chmod step every time because `/opt/pi-control/*` isn't where either
+actually runs from - only `app.py`/`templates/`/`static/` are read
+in-place from `/opt/pi-control`.
+
+One-off extra step, only when a change specifically touches
+`picontrol.service` itself (called out explicitly whenever that happens -
+last needed for Phase 8f's `--threads=8`):
+```
+sudo cp /opt/pi-control/picontrol.service /etc/systemd/system/picontrol.service
+sudo systemctl daemon-reload
 ```
