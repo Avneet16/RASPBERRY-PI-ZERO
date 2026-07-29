@@ -620,3 +620,73 @@ greps, file listings, journalctl per service):
 
 No deploy changes for this batch - standard `bash
 ~/pi-control/deploy-pi-control.sh`.
+
+## Phase 8l — Normal-update button, Proton data-usage fix, egress timeout race
+
+**Added a plain "UPDATE" button** next to CHECK/FULL UPGRADE on the
+Overview SYSTEM UPDATES card - runs `apt-get upgrade` (conservative: never
+removes an installed package or pulls in a new one to satisfy a
+dependency change, no autoremove either) as distinct from the existing
+FULL UPGRADE (`apt-get full-upgrade` + `autoremove`). Backend threads the
+choice through as a `kind` ("normal"/"full") parameter: new
+`normal-upgrade` helper action, `_run_upgrade(kind)`, `UPDATE_STATE`
+gains a `kind` field so `/api/updates/status` can report which one is
+running, `/api/updates/upgrade` validates `kind` and 400s on anything
+else. Both buttons now disable/re-enable together in `app.js` via a
+shared `upgradeButtons()` helper instead of the old single `upgrade-btn`
+id.
+
+**DATA USAGE card fixed** - it showed "proton: not active" even with
+Proton genuinely connected (confirmed active on the PROTON VPN card,
+same tab, same load). Root cause: `_net_iface_stats()` was matching a
+hardcoded literal `"proton"` interface name, but per the Phase 7d
+multi-server design `wg-quick` names the interface after the config file
+basename (`proton-us.conf` -> interface `proton-us`), so a literal
+`"proton"` never exists in `psutil.net_io_counters()` regardless of
+connection state. Fixed by searching the counters for any key starting
+with `"proton-"` and reporting whichever one is actually up; falls back
+to the literal `"proton"`/`None` stats if no server is connected, same
+as before.
+
+**Egress check still showing "failed" even after the Phase 8k DNS fix**
+- root cause this time was a timeout race, not the DNS bug from before.
+The helper's internal `curl --max-time 8` had zero buffer against the
+Python-side `subprocess.run(..., timeout=8)` wrapping it, and `getent`
+itself has no timeout of its own - so on a slow real-world DNS lookup or
+handshake over the bound `tailscale0` interface, the *outer* Python
+timeout could fire first and raise `TimeoutExpired`, discarding whatever
+diagnostic string the helper would otherwise have echoed. Fixed on both
+sides: helper now bounds `getent` with `timeout 5` and adds `-S` (with
+stderr merged via `2>&1`) so curl's own error text comes through instead
+of just the generic fallback marker; Python side bumps the outer
+timeout to 15s (5s getent + 8s curl = 13s worst case, now with real
+headroom) and captures stderr as well as stdout so a real curl error
+message surfaces in the UI instead of collapsing to "failed".
+
+**7-day performance trends still empty** - not fixed this round, root
+cause not yet confirmed. Two candidate explanations, not mutually
+exclusive: (a) the 5-min downsample only persists to `trends.db` every
+5th in-memory sample (~4 minutes of continuous uptime since the last
+service restart before the first row is ever written) - given how many
+times `picontrol` has been redeployed/restarted during this same
+debugging session, it may simply never have stayed up 4 minutes
+straight since the last restart; (b) `/opt/pi-control` not being
+writable by the service user would silently set `TRENDS_DB_AVAILABLE =
+False` (a deliberate crash-avoidance fallback from an earlier phase) -
+critically, the fact that the 1HR chart *does* work doesn't rule this
+out, since that chart reads only the in-memory `HISTORY` deque and never
+touches sqlite at all. Needs a quick diagnostic on the real device
+before guessing at a code fix:
+```
+ls -la /opt/pi-control/trends.db
+sqlite3 /opt/pi-control/trends.db "SELECT COUNT(*), MIN(ts), MAX(ts) FROM trends;"
+systemctl show picontrol -p ActiveEnterTimestamp
+```
+If the row count is 0 and uptime is under ~5 minutes, it's just (a) -
+no code change needed, only time. If the file itself is missing/empty
+after a long uptime, it's (b), and the fix is making sure
+`/opt/pi-control` (or wherever `trends.db` should live) is writable by
+the `picontrol` service's user.
+
+No `picontrol.service` changes this batch - standard `bash
+~/pi-control/deploy-pi-control.sh` is enough.
