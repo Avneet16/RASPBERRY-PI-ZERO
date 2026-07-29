@@ -663,30 +663,48 @@ timeout to 15s (5s getent + 8s curl = 13s worst case, now with real
 headroom) and captures stderr as well as stdout so a real curl error
 message surfaces in the UI instead of collapsing to "failed".
 
-**7-day performance trends still empty** - not fixed this round, root
-cause not yet confirmed. Two candidate explanations, not mutually
-exclusive: (a) the 5-min downsample only persists to `trends.db` every
-5th in-memory sample (~4 minutes of continuous uptime since the last
-service restart before the first row is ever written) - given how many
-times `picontrol` has been redeployed/restarted during this same
-debugging session, it may simply never have stayed up 4 minutes
-straight since the last restart; (b) `/opt/pi-control` not being
-writable by the service user would silently set `TRENDS_DB_AVAILABLE =
-False` (a deliberate crash-avoidance fallback from an earlier phase) -
-critically, the fact that the 1HR chart *does* work doesn't rule this
-out, since that chart reads only the in-memory `HISTORY` deque and never
-touches sqlite at all. Needs a quick diagnostic on the real device
-before guessing at a code fix:
-```
-ls -la /opt/pi-control/trends.db
-sqlite3 /opt/pi-control/trends.db "SELECT COUNT(*), MIN(ts), MAX(ts) FROM trends;"
-systemctl show picontrol -p ActiveEnterTimestamp
-```
-If the row count is 0 and uptime is under ~5 minutes, it's just (a) -
-no code change needed, only time. If the file itself is missing/empty
-after a long uptime, it's (b), and the fix is making sure
-`/opt/pi-control` (or wherever `trends.db` should live) is writable by
-the `picontrol` service's user.
+**7-day performance trends still empty** - two candidate root causes were
+identified but not yet confirmed; see Phase 8m below for the resolution.
 
 No `picontrol.service` changes this batch - standard `bash
 ~/pi-control/deploy-pi-control.sh` is enough.
+
+## Phase 8m — Real root cause of empty 7-day trends: /opt/pi-control ownership
+
+Diagnostic from Phase 8l came back: `trends.db` doesn't exist at all,
+despite `picontrol` having been up for hours (`ActiveEnterTimestamp` many
+hours in the past) - which rules out "not enough continuous uptime yet"
+outright. That pointed straight at the other candidate: a writability
+problem.
+
+Root cause, confirmed by reading `deploy-pi-control.sh` alongside
+`picontrol.service`: the deploy script installs app files with `sudo cp
+-r "$HOME/pi-control/"* /opt/pi-control/`, which leaves everything under
+`/opt/pi-control` **owned by root** (plain `cp` doesn't preserve the
+source owner, and it's invoked via `sudo`). But `picontrol.service` runs
+as `User=anon` - an unprivileged user that can read root-owned files
+fine (which is exactly why the rest of the app has always worked: it
+only ever reads `app.py`/`templates/`/`static/`), but can never *create a
+new file* inside a directory it doesn't own. Every call to
+`_init_trends_db()`, on every single startup since this feature was
+introduced, has been hitting a permission-denied opening `trends.db` for
+the first time, caught by the deliberate crash-avoidance `except
+Exception: TRENDS_DB_AVAILABLE = False` guard - so the failure was
+silent by design, never crashed anything, and never left an error
+anywhere obvious to spot.
+
+This is bigger than just the 7-day chart: `_load_setting`/`_save_setting`
+(ALERT_THRESHOLDS persistence across restarts) and `_record_alert_history`
+(the ALERTS tab's alert history) both depend on the exact same file being
+writable, so both have also been silently no-ops this whole time -
+threshold edits on the ALERTS tab were taking effect live but reverting
+to defaults on every restart, and alert history was never actually being
+recorded to survive a restart either.
+
+**Fix**: `deploy-pi-control.sh` now runs `sudo chown -R anon:anon
+/opt/pi-control` immediately after the `cp -r` step, every deploy - fully
+self-healing on the very next redeploy, no manual one-off command needed
+on the device itself.
+
+No `picontrol.service` changes - standard `bash
+~/pi-control/deploy-pi-control.sh` picks up the fix automatically.
