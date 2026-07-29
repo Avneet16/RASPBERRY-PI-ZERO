@@ -759,3 +759,52 @@ noisy after this fix.
 
 No `picontrol.service` changes - standard `bash
 ~/pi-control/deploy-pi-control.sh` is enough.
+
+## Phase 8o — 7-day trends confirmed fixed; UPDATE/FULL UPGRADE silently doing nothing
+
+The Phase 8m ownership fix confirmed working: 7-day trends now populate
+on the real device.
+
+**UPDATE/FULL UPGRADE reported as "not working"** - diagnosed by hitting
+the endpoint directly with curl (bypassing the browser/JS/nginx
+entirely), using a token freshly scraped from the current page:
+```
+CSRF=$(curl -s http://127.0.0.1:8088/ | grep -oP 'data-csrf-token="\K[^"]+')
+curl -sv -X POST http://127.0.0.1:8088/api/updates/upgrade \
+  -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" -d '{"kind":"normal"}'
+```
+This came back `200 {"ok":true,"started":true,"kind":"normal"}`, and
+`journalctl -u picontrol` showed the `normal-upgrade` helper action
+actually ran to completion (~19s) with no errors - so the backend has
+been fine the whole time.
+
+Root cause was in the browser, not the server: `CSRF_TOKEN =
+secrets.token_hex(32)` (`app.py`) is generated once per process start
+and baked into the page HTML at load time. Any dashboard tab left open
+from *before* the most recent `picontrol` restart (extremely likely
+after this session's string of redeploys) is holding a stale token that
+no longer matches the current process - every POST from that tab 403s
+silently. This wasn't unique to the new UPDATE button; it would affect
+any POST action from a stale tab, but UPDATE/FULL UPGRADE happened to be
+the first POST tried since the last restart, so it's what surfaced it.
+
+That alone explains "not working," but reading `runUpgrade()` in
+`app.js` turned up a real, independent bug worth fixing regardless of
+root cause: it only special-cased HTTP 409 ("already running") - any
+*other* non-2xx response (403 from a stale CSRF token, 400, 500, ...)
+fell through silently into `pollUpgradeStatus()`, which would just see
+`running: false` / `done_ok: null` (nothing ever actually started) and
+quietly re-enable the buttons with zero feedback. From the user's
+perspective that's indistinguishable from "button does nothing" -
+exactly what got reported. Fixed: a non-OK response now surfaces the
+server's actual `error` message (or the raw HTTP status if the body
+isn't JSON) in an error toast instead of failing silently.
+
+**Action for you**: hard-refresh (force-reload) the dashboard tab before
+retrying UPDATE - that alone should resolve it even before redeploying
+this fix, since it's a client-side stale-token issue. After redeploying
+this batch, any future CSRF failure will show up as a clear toast
+instead of silent nothing.
+
+No `picontrol.service` changes - standard `bash
+~/pi-control/deploy-pi-control.sh` is enough.
