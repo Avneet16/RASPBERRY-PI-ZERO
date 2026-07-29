@@ -708,3 +708,54 @@ on the device itself.
 
 No `picontrol.service` changes - standard `bash
 ~/pi-control/deploy-pi-control.sh` picks up the fix automatically.
+
+## Phase 8n — False-positive DOWN/stale Telegram alerts (UFW, Tailscale, Proton)
+
+Real device Telegram logs showed repeated, isolated flapping - "service(s)
+DOWN: UFW" immediately followed by "service(s) back UP: UFW" (four times),
+one isolated Tailscale DOWN/UP pair, and Proton handshake "stale" (301s,
+then 302s - right at the 300s default threshold) immediately followed by
+"fresh again", each time with nothing else changing at the same moment.
+
+Root cause: `_service_statuses()` and `_proton_status()` each spawn one or
+more `sudo` subprocesses (systemctl, the ufw-status helper action, wg) on
+every ~3s tick of `_sample_fast()`. On a Pi Zero 2W, any transient hiccup
+(disk I/O from the trends write every 5 min, journald contention, a slow
+sudo lookup) can occasionally push one of those calls past its 5s timeout;
+the code already handles that failure safely (defaults to "down"/falls
+back), but the *alerting* logic was treating a single bad poll exactly the
+same as a real state change - so one missed poll was enough to fire a
+false DOWN alert, followed by a false recovery UP alert 3s later once the
+next poll came back clean. This is a different bug from the two fixed
+earlier in this same investigation (Phase 8l/8m) - those were "the data
+is missing/wrong"; this one is "occasionally slow to read, and reading
+'down' once was wrongly treated as certain."
+
+**Fix**: added a small consecutive-confirmation counter
+(`ALERT_CONFIRM_POLLS = 2`, `_ALERT_PENDING`) for both the per-service
+down/up check and the Proton stale-handshake check - a reading now has to
+show up on 2 consecutive ~3s polls before it's treated as a real
+transition and alerted on. A single-poll blip that self-corrects on the
+very next poll (exactly what the logs showed) no longer alerts at all;
+this adds at most ~3-6s of detection latency for a genuine outage, which
+is immaterial for these checks. The live status shown on the dashboard
+itself (Overview's ACTIVE SERVICES, NET's PROTON VPN card) is unaffected -
+only the Telegram alert *transition* detection is debounced, so the UI
+still always reflects the latest real poll.
+
+Verified with a mocked `_service_statuses()`/`_proton_status()`/`time.sleep`
+harness feeding `_sample_fast()` a scripted sequence: a single-poll UFW
+blip (down then immediately back up) fires zero alerts, while a
+genuinely-sustained down (confirmed on 2 consecutive polls) fires exactly
+one DOWN alert.
+
+If Proton handshake-stale alerts keep recurring right around 300-310s
+even with the debounce, that's likely genuine boundary-hovering (idle
+traffic gaps naturally push the handshake age close to the default
+300s threshold) rather than a bug - `stale_handshake_s` is already
+live-tunable from the ALERTS tab without a redeploy, so bumping it up a
+bit (e.g. to 450-600s) is the right knob to reach for if it's still
+noisy after this fix.
+
+No `picontrol.service` changes - standard `bash
+~/pi-control/deploy-pi-control.sh` is enough.
