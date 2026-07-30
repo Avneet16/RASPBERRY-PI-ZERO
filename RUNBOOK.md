@@ -808,3 +808,109 @@ instead of silent nothing.
 
 No `picontrol.service` changes - standard `bash
 ~/pi-control/deploy-pi-control.sh` is enough.
+
+## Phase 8p — Replace nginx Basic Auth with a real login page (Bitwarden autofill)
+
+**Motivation**: nginx's `auth_basic` triggers Chrome's *native* HTTP-auth
+dialog, which lives outside the page DOM - Bitwarden's extension (and
+most extension-based password managers) can't autofill it, since content
+scripts only see the actual page. Clicking the Bitwarden icon shifts
+focus away from the dialog, and Chrome frequently cancels/resends the
+request with no credentials, surfacing as "Auth required" for no visible
+reason.
+
+**Investigated the actual routing first**, since guessing wrong here
+risks something much worse than an annoying dialog: `sudo cat
+/etc/nginx/sites-available/pi-control` showed `auth_basic` set once at
+the *server* level, covering two completely different upstreams -
+`location /` (the Flask dashboard, :8088) and `location /terminal/` (a
+separate `ttyd` process, :7681, giving full shell access). The terminal
+was only ever protected because it happened to share the same
+`auth_basic` block - a plain per-app session cookie checked only inside
+the Flask app would have left `/terminal/` (full shell, same as SSH)
+completely unauthenticated the moment `auth_basic` was removed, since
+ttyd is a different process nginx proxies to directly and never routes
+through Flask at all.
+
+**Fix uses nginx's `auth_request` module** (confirmed present via `nginx
+-V 2>&1 | grep auth_request` before committing to this design) so *both*
+upstreams get gated by the same check, in one place, instead of only the
+one Flask actually fronts:
+
+Flask side (`app.py`):
+- `_load_setting()` generalized to take an optional `cast` (was
+  hardcoded to `float` for the alert-threshold use case) so it can also
+  load/store strings - reused for the session secret key and the
+  username/password hash, in the same `settings` table Phase 8m already
+  fixed the write-permission for.
+- `app.secret_key` is generated once and persisted (same pattern as
+  `flask_secret_key` in `settings`) - regenerating it every restart
+  like `CSRF_TOKEN` would silently log everyone out on every redeploy,
+  making "remember me for 30 days" a lie given how often this app gets
+  redeployed during development.
+- `/login` (GET/POST): first-run experience *is* the setup form - if no
+  password is configured yet, it asks you to create a username/password
+  (min 8 chars, confirm match) instead of showing a login form; once
+  set, later visits show a normal login. No env vars or manual hash
+  generation needed to bootstrap it. Password hashed with
+  `werkzeug.security.generate_password_hash` (already a Flask
+  dependency, PBKDF2-SHA256 - no new pip package).
+  `login.html` uses plain `<form>` fields with standard
+  `autocomplete="username"/"current-password"/"new-password"` attributes
+  specifically so Bitwarden (or any password manager) recognizes and
+  autofills it like any other website login - the entire point of this
+  change.
+- `/logout` clears the session.
+- `/api/auth/check`: the endpoint nginx's `auth_request` calls
+  internally on every request to check the session cookie - 200 if
+  logged in, 401 (via the existing generic `/api/` 401 handling in
+  `_require_login`) if not. Not reachable directly from outside once
+  nginx marks it `internal`.
+- New `_require_login` `before_request` hook (runs before the existing
+  CSRF hook) exempts only `/login` and `/static/*` (so the login page
+  and its CSS can load while logged out); everything else redirects to
+  `/login` (or 401s for `/api/*`) without a valid session.
+- Session cookie: `SESSION_COOKIE_SECURE=True` (nginx already terminates
+  TLS - confirmed via `listen 9448 ssl;` in the site config),
+  `HTTPONLY=True`, `SAMESITE=Lax`, 30-day lifetime per your answer.
+
+Verified with a Flask test-client script driving the full flow: logged
+out redirects to `/login` (401 for `/api/*`, `/login` and `/static/`
+stay reachable); first POST to `/login` with no password configured
+creates the account, logs in, and persists across a simulated restart;
+wrong password rejected with a message; correct password logs in;
+`/logout` clears the session and protected routes redirect again;
+`/api/auth/check` returns exactly the 401/200 nginx's `auth_request`
+needs to see in each state.
+
+**nginx side (NOT yet applied - deliberately last)**: replace
+`auth_basic`/`auth_basic_user_file` with `auth_request /api/auth/check`
+on *both* `location /` and `location /terminal/`, an internal probe
+location proxying to the Flask app with `proxy_method GET` (an
+`auth_request` subrequest reuses the original request's method by
+default, and Flask's `/api/auth/check` route only accepts GET - without
+forcing GET here, every POST /api/action/* would 405 the probe and nginx
+would 500 instead of proxying through), and a named `@login_redirect`
+location (`return 302 /login`) wired via `error_page 401 = @login_redirect`
+so an unauthenticated visitor lands on the new login page instead of
+seeing a raw 401. `location = /login` and `location /static/` are
+carved out with no `auth_request` (avoids a redirect loop and lets the
+login page's own CSS load). AdGuard's separate `auth_basic` in
+`adguard.conf` is untouched - it has no login page of its own, so Basic
+Auth stays there by design.
+
+**Deploy order, deliberately staged so there's no lockout window and no
+gap with zero auth**:
+1. Redeploy this batch (`bash ~/pi-control/deploy-pi-control.sh`) -
+   nginx's `auth_basic` stays in place throughout, so access doesn't
+   change yet.
+2. Visit the dashboard - you'll hit the existing Basic Auth prompt first
+   (unchanged), then land on the new `/login` page underneath it in
+   setup mode. Create the account, confirm you land on the dashboard,
+   confirm `/logout` and logging back in both work.
+3. Only once that's confirmed working: swap
+   `/etc/nginx/sites-available/pi-control` to the `auth_request` version,
+   `sudo nginx -t`, then `sudo systemctl reload nginx` (reload, not
+   restart - keeps `adguard.conf`/`default` sites up the whole time).
+   From that point on, Basic Auth is gone for pi-control and Bitwarden
+   autofill works normally on `/login`.
