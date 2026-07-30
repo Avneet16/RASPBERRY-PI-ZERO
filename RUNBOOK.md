@@ -914,3 +914,15 @@ gap with zero auth**:
    restart - keeps `adguard.conf`/`default` sites up the whole time).
    From that point on, Basic Auth is gone for pi-control and Bitwarden
    autofill works normally on `/login`.
+
+**Confirmed live on the device**: all three steps completed - account
+created via the setup form, `/login`/`/logout` round-tripped correctly,
+`auth_basic`/`auth_basic_user_file` swapped for the `auth_request`
+config above (old file kept as
+`/etc/nginx/sites-available/pi-control.bak-<timestamp>` in case a
+rollback is ever needed), `nginx -t` passed, reloaded clean. Both the
+dashboard and the TERMINAL tab now go straight to `/login` with no
+Basic Auth prompt, a single session covers both, and Bitwarden autofills
+the login form correctly - the original problem this phase set out to
+fix. AdGuard's own site/`auth_basic` was untouched throughout, as
+intended.
