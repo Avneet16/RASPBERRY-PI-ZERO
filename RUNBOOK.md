@@ -1082,3 +1082,107 @@ that everyone's existing CSRF token becomes invalid at once (it's now
 per-session and freshly generated on the first page load after this
 change) - a normal page load handles this transparently, nothing to do
 manually.
+
+## Phase 8r — BentoPDF/OmniTools static self-hosting, RAM investigation, enable/disable toggle
+
+**Deployed BentoPDF** as pure static files, no Docker: confirmed this Pi
+runs 32-bit Raspberry Pi OS (`armv7l` via `uname -a`), and neither
+BentoPDF nor OmniTools publish an `armv7` Docker image (only `amd64`/
+`arm64`) - Docker was a dead end here regardless of RAM concerns.
+BentoPDF's `STATIC-HOSTING.md` documents an official pre-built
+`dist-{version}.zip` on GitHub Releases, so no build tooling is needed
+at all - `curl` the zip straight from the Pi, unzip to `/opt/bentopdf`.
+Stripped `*.br` files (need an nginx module this Pi's stock nginx
+doesn't have) and 20 non-English locale directories (pure page
+duplication, ~85MB, not needed for a single-user personal deployment) -
+162M final footprint. New nginx site on port 9449 (`sites-available/
+bentopdf`), same TLS cert and Tailscale/loopback `allow`/`deny` rules as
+the other sites, no `auth_basic` (matches the reasoning from Phase 8p -
+personal utility tool, no persistent server-side data since processing
+is 100% client-side, network layer already gates access).
+
+**OmniTools deployment stalled on tooling, not architecture** - this one
+needs an actual build (TypeScript + Vite, no pre-built static release
+exists). Hit three separate walls before landing on the right approach:
+1. My own sandbox's network policy blocks `registry.npmmirror.com` and
+   `cdn.sheetjs.com` (transitive dependencies resolve through these,
+   confirmed via direct `curl` - genuine CONNECT-tunnel 403s, not an
+   npm config issue) - dead end for building it there.
+2. Termux (Android) failed differently: `@swc/core`'s prebuilt native
+   binding can't load under Android's Bionic libc (a known Termux
+   limitation for native Node addons, unrelated to phone specs).
+3. The repo's own CI (`.github/workflows/ci.yml`) doesn't upload a
+   static `dist` artifact anywhere downloadable - it deploys straight to
+   Netlify/Docker, no plain zip to grab.
+
+Resolution: build on any normal Linux/Mac/Windows machine (a laptop -
+static output doesn't care what built it, only that the machine has a
+working native-addon-capable Node, which the Pi's own weak hardware and
+architecture wouldn't handle for a build this heavy anyway even
+setting the tooling issues aside). Pending - user has a laptop but
+needs time to get to it. Once built, needs an SPA-style nginx site
+(`try_files ... /index.html`) since OmniTools is a single-page app with
+client-side routing, unlike BentoPDF's separate-static-page-per-tool
+build.
+
+**RAM investigation - thorough, and the conclusion is "nothing is
+wrong"**: user suspected BentoPDF was consuming significant RAM after
+seeing overall usage climb. Traced through several layers before
+concluding correctly:
+- `ps aux --sort=-%mem` showed nginx workers at 2-5Mi RSS each - static
+  file serving via `sendfile` costs nginx nothing regardless of the
+  size of files on disk, ruling out BentoPDF as a resident-memory
+  consumer immediately.
+- Per-process `VmSwap` breakdown (`/proc/$pid/status`) identified
+  AdGuardHome as the largest single contributor to swap (~60Mi logical)
+  - matches its own startup log exactly (`dnsproxy: cache enabled
+    size=41943040`, a ~40MB DNS response cache) - expected caching
+  behavior for a DNS server, not a leak. pi-control itself: ~15Mi,
+  unremarkable for a Flask app.
+- Confirmed swap is zram-backed (`swapon --show` -> `/dev/zram0`), and
+  `zram-stats` showed a real ~1.55-1.61x compression ratio - the ~260Mi
+  "in swap" figure everyone was staring at only costs ~165-190Mi of
+  *actual* RAM once compression is accounted for, and that compressed
+  cost is already what `free -h`'s "used" reflects.
+- Zero OOM-kills ever, confirmed via `journalctl -k | grep -i oom`.
+- **Empirically proved the null hypothesis**: disabled BentoPDF's nginx
+  site entirely and took `free -h` immediately before/after. Memory
+  usage went *up* slightly (342Mi -> 359Mi used), not down - conclusive,
+  measured evidence that stopping BentoPDF returns zero RAM, because
+  there was never a dedicated process consuming it to begin with. The
+  small uptick is just the normal worker-respawn cost of any nginx
+  reload, unrelated to which site was removed.
+
+Declined to add a low-`MemAvailable` alert - user was satisfied with the
+above and didn't want additional monitoring for this.
+
+**Added an enable/disable toggle for self-hosted static apps** anyway -
+not for RAM (proven above to be pointless for that), but for reducing
+exposed attack surface: one less live listener when a tool isn't in
+active use. New generic mechanism, not hardcoded to just BentoPDF, so
+adding OmniTools later is just one more entry in two lists:
+- `pi-control-helper.sh`: `ALLOWED_NGINX_SITES` whitelist (mirrors the
+  `ALLOWED_SERVICES` pattern already used for `restart`) plus
+  `site-status`/`site-enable`/`site-disable` actions - `ln -sf`/`rm` on
+  the `sites-enabled` symlink, `nginx -t` before `systemctl reload`.
+- `app.py`: `NGINX_SITES` list (name/label/port), `/api/sites/status`
+  (polled every 5s alongside the rest of the NET tab - cheap, it's just
+  a symlink existence check) and `/api/action/sites/<site>/<action>`,
+  validated against the whitelist server-side too (defense in depth,
+  same as every other action route in this app).
+- New "SELF-HOSTED APPS" card on the NET tab: status dot, an "Open"
+  link when enabled, and an ENABLE/DISABLE button per app.
+
+Verified with a Flask test-client script: status/enable/disable all
+invoke the correct helper action with the correct arguments; a site
+name outside the whitelist (tried `omni-tools` before it's actually
+configured, and a path-traversal-style value) is rejected with 400
+*before* ever reaching the helper subprocess call; an invalid action
+name is rejected the same way.
+
+**Action for you**: redeploy (`bash ~/pi-control/deploy-pi-control.sh`),
+then re-run the two BentoPDF nginx commands from earlier in this session
+(`ln -sf .../sites-available/bentopdf .../sites-enabled/bentopdf`,
+`nginx -t && systemctl reload nginx`) to re-enable it, since it's
+currently disabled from the live RAM test above - or just use the new
+toggle in the dashboard once redeployed.
