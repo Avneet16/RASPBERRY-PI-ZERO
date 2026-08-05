@@ -926,3 +926,159 @@ Basic Auth prompt, a single session covers both, and Bitwarden autofills
 the login form correctly - the original problem this phase set out to
 fix. AdGuard's own site/`auth_basic` was untouched throughout, as
 intended.
+
+## Phase 8q — Security review triage: fixed a real stored XSS + 7 others, rejected 7
+
+A large external security-review dump (15 numbered findings plus a
+separate "critical" list, evidently AI/tool-generated) came in. Rather
+than implementing it wholesale, each finding was checked against the
+actual code before acting - several turned out to be flatly wrong about
+what's in this codebase, and a couple of the suggested "fixes" would
+have actively broken something or reversed an explicit earlier decision.
+
+**Fixed (confirmed real):**
+
+1. **Stored XSS via WiFi SSID (was rated CRITICAL, and rightly so)** -
+   `app.js`'s NET tab rendered `n.ssid`/`n.security` from a live `nmcli`
+   scan straight into `innerHTML` with zero escaping. Any device
+   broadcasting an SSID like `<img src=x onerror=fetch(...)>` within
+   WiFi range would get that executed in the dashboard's own page
+   context on the next poll - and since the CSRF token sits in
+   `document.body.dataset.csrfToken`, script running via this XSS could
+   read it directly and fire any authenticated POST (reboot, upgrade,
+   disconnect Proton, ...) with zero further access needed. This is a
+   physical-proximity attack requiring no credentials at all. Fixed by
+   switching to `textContent`/`createTextNode` (saved-networks select
+   and available-networks list). Added a small `esc()` helper and
+   applied it to three other spots carrying real external/attacker-
+   influenced text that had the same unescaped-`innerHTML` pattern:
+   system-events lines (journalctl, which can embed content from
+   network-failover events), Tailscale peer hostnames (settable by
+   anyone else on the same tailnet), SSH auth log lines (a failed SSH
+   login attempt can embed an arbitrary "attempted username" string in
+   the log, reachable with no auth at all over the network), and alert
+   history messages. Left fail2ban jail names/IPs and process names
+   (top CPU/mem) un-escaped - lower-value targets (fixed config names,
+   dotted-quad IPs, or already requires local code execution to abuse)
+   where the diff cost didn't seem worth it given time spent elsewhere
+   in this batch.
+2. **WiFi active-scan radio contention** - `_sample_net()` ran a full
+   active `nmcli device wifi list` scan every 8s, which takes the radio
+   off-channel and can briefly interrupt current wlan0 traffic (client
+   mode or this Pi's own AP-failover mode). Now only forces a real scan
+   (`--rescan yes`) once every ~64s (every 8th poll); the other 7 polls
+   read NetworkManager's existing cached results via `--rescan no`. The
+   cheap per-poll checks (device status, saved networks, Tailscale peers)
+   stay on the fast 8s cycle since they don't touch the radio.
+3. **CSRF token was a single process-wide constant** - regenerated once
+   at process start and shared by every visitor. Now generated per
+   session (`session["csrf_token"]`, lazily created on first render of
+   `/`) now that real sessions exist from Phase 8p - a leak of one
+   session's token no longer matters to any other session, and a
+   redeploy/restart no longer invalidates every open tab's token
+   independent of whether their login session itself is still valid.
+4. **No rate limiting on `/login`** - added a small in-memory sliding-
+   window limiter (5 failed attempts / 5 minutes, keyed by
+   `X-Real-IP` since nginx sets that header) instead of pulling in the
+   `flask-limiter` package - a plain dict + lock matches this app's
+   existing lightweight style and avoids a new dependency on a Pi Zero.
+   Only guards the real login path; setup_mode isn't brute-forceable
+   (no password exists yet to guess).
+5. **`session.clear()` before setting the new session on login** - cheap
+   defensive hygiene, added to both the setup and normal-login success
+   paths.
+6. **Aggressive `clean-logs`** - swapped the hard `--vacuum-size=20M` +
+   unconditional delete-every-rotated-log for `--vacuum-time=7d` +
+   `-mtime +30` on the `find` deletes. This Pi has 26GB free; there's no
+   real pressure to keep the journal that small, and destroying all
+   forensic history on every click of CLEAN LOGS was a bad trade for the
+   disk space it saved.
+7. **Silent background-thread failures** - added `logging.basicConfig`
+   (journald already captures stderr from this systemd-run process, so
+   this needed zero new infrastructure) and replaced every bare
+   `except Exception: pass` in the six `_sample_*`/`_sample_loop`
+   background threads with `logger.exception(...)`. Also found and fixed
+   a real related gap while doing this: `_sample_slow` and `_sample_disk`
+   had **no outer catch-all at all** - an exception anywhere outside
+   their inner per-item try/excepts (e.g. inside the `CACHE_LOCK` block)
+   would have silently killed that daemon thread forever, with nothing
+   but a bare stderr traceback and no periodic retry - worse than the
+   "silent but at least still running" issue the review actually
+   flagged. Both now wrap the whole loop body and log-and-continue like
+   the other four sampling loops.
+8. **No confirmation before FULL UPGRADE** - added a `confirm()` dialog,
+   matching the existing pattern already used for REBOOT PI. Does NOT
+   touch the conservative UPDATE button.
+
+**Explicitly rejected or downgraded, with reasoning:**
+
+- **"Remove FULL UPGRADE / require SSH for upgrades"** - directly
+  contradicts what was explicitly asked for and built in Phase 8l
+  (adding easier access to upgrades, not less). A confirmation dialog
+  (above) is the right-sized safety improvement here, not removing the
+  feature.
+- **"CACHE reads aren't lock-protected in `_overview_snapshot()`"** -
+  checked every `CACHE[...]` read site in the file; all of them,
+  including `_overview_snapshot()`, already sit inside `with
+  CACHE_LOCK:`. This finding doesn't match the actual code - no change
+  made.
+- **"UPDATE_LOCK stays held for up to 30 minutes if the browser closes"**
+  - checked `_run_upgrade()`: the lock is only held for the instant
+    state-flip at the start and end, never across the `subprocess.run(...)`
+  call itself, and the upgrade runs in a fully detached background
+  thread that doesn't care whether a browser is still connected. The
+  suggested fix code (`with UPDATE_LOCK(timeout=30):`) also isn't valid
+  Python - `threading.Lock` doesn't support that call signature. No
+  change made.
+- **"Hide command stderr from the user, return generic errors instead"**
+  - wrong context fit: this is a single-owner admin tool where the
+    "user" and the person debugging their own Pi are the same person.
+  Multiple earlier phases in this exact runbook (8n, 8o) deliberately
+  added *more* raw stderr surfacing to fix real debugging pain -
+  reversing that for a generic-audit "don't leak internals" rule would
+  directly undo those fixes for no real benefit here.
+- **"Add an HTTPS-enforcing `before_request` redirect"** - as written,
+  this would have created an infinite redirect loop: nginx doesn't
+  currently forward `X-Forwarded-Proto` to the Flask app, and the
+  suggested check depends on that header being present. Flask is only
+  ever reachable from nginx over loopback, which itself only accepts
+  Tailscale/loopback traffic per the `allow`/`deny` rules already in
+  place - the described bypass scenario needs nginx itself to already
+  be misconfigured, at which point a lot more than this would be
+  broken. Skipped as unneeded complexity for the actual risk.
+- **iframe `sandbox` attribute on the terminal** - added the harmless
+  part (`referrerpolicy="no-referrer"`) but deliberately skipped
+  `sandbox="allow-scripts allow-same-origin"`. This iframe is same-
+  origin, fully-trusted content this app itself serves (ttyd) - sandbox
+  protects a parent page from an *untrusted* child, which doesn't apply
+  here, and there was real, untestable risk of silently breaking the
+  embedded terminal (a feature relied on for actual system
+  administration) for a benefit that's mostly theoretical in this
+  specific same-origin case.
+- **"Session fixation - regenerate the session ID after login"** -
+  category mismatch: Flask's default sessions are signed client-side
+  cookies (itsdangerous), not an opaque server-side session ID an
+  attacker could pre-fixate the way classic session-fixation attacks
+  work. `session.clear()` (above) is added as cheap hygiene regardless,
+  but the severity as originally framed doesn't apply to this
+  architecture.
+- **Chart.js load size "DoS"** - mischaracterized as a vulnerability;
+  it's normal script-loading latency, not something an attacker can
+  trigger, and it's already mitigated for repeat visits by the existing
+  1-year cache header on `/static/vendor/*` from an earlier phase.
+
+Verified with a Flask test-client script: per-session CSRF tokens
+differ between two independent sessions and both correctly reject a
+wrong token; the login rate limiter blocks the 6th attempt within the
+window and is scoped per-`X-Real-IP` (a different IP is unaffected); the
+WiFi rescan cadence alternates `yes` on polls 1 and 9 and `no` on the 7
+in between, exactly as designed. All `app.py`/`app.js`/`pi-control-
+helper.sh`/`index.html` changes diff-reviewed clean against the last
+committed tarball.
+
+No `picontrol.service` changes - standard `bash
+~/pi-control/deploy-pi-control.sh` is enough. After redeploying, note
+that everyone's existing CSRF token becomes invalid at once (it's now
+per-session and freshly generated on the first page load after this
+change) - a normal page load handles this transparently, nothing to do
+manually.
