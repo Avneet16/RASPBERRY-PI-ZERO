@@ -1186,3 +1186,39 @@ then re-run the two BentoPDF nginx commands from earlier in this session
 `nginx -t && systemctl reload nginx`) to re-enable it, since it's
 currently disabled from the live RAM test above - or just use the new
 toggle in the dashboard once redeployed.
+
+## Phase 8s — OmniTools deployed via Windows build, added to the toggle
+
+The Termux/sandbox build blockers from Phase 8r turned out not to apply
+on a real Windows machine with Node installed normally: `npm install`
+and `npm run build` both worked without issue there (the `@swc/core`
+native binding that failed under Termux's Bionic libc loads fine from
+its normal prebuilt Windows binary). Confirms the diagnosis from 8r -
+those were tooling/environment problems, not anything about the app
+itself.
+
+Transferred the built `dist/` (zipped via `Compress-Archive`) straight
+from Windows to the Pi over `scp`, since the Windows machine is already
+on the same Tailscale network - no phone/Termux hop needed this time.
+
+Deployed as a new nginx site on port 9450 (next free port after
+9442/9448/9449), same TLS cert and `allow`/`deny` rules as the other
+sites, `root /opt/omni-tools`. Needs `try_files $uri $uri/ /index.html;`
+for the SPA fallback - unlike BentoPDF's separate-static-page-per-tool
+build, OmniTools is a single-page app with client-side routing, so a
+direct hit on any non-root path needs to fall through to `index.html`
+or it 404s.
+
+Added `omni-tools` to both whitelists (`ALLOWED_NGINX_SITES` in
+`pi-control-helper.sh`, `NGINX_SITES` in `app.py`) so it shows up in the
+SELF-HOSTED APPS card next to BentoPDF automatically - deliberately did
+NOT symlink it into `sites-enabled` manually this time, since the whole
+point of the Phase 8r toggle work was to make that unnecessary going
+forward. First enable is via the dashboard, not a manual `ln -sf`.
+
+No `picontrol.service` changes - standard `bash
+~/pi-control/deploy-pi-control.sh`. After redeploying, both BentoPDF and
+OmniTools should appear in the SELF-HOSTED APPS card - enable OmniTools
+from there and confirm a couple of tools actually run (file conversion,
+image tools, whatever) to verify the WASM-based client-side processing
+works end to end, same as the BentoPDF verification.
