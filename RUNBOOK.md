@@ -1222,3 +1222,52 @@ OmniTools should appear in the SELF-HOSTED APPS card - enable OmniTools
 from there and confirm a couple of tools actually run (file conversion,
 image tools, whatever) to verify the WASM-based client-side processing
 works end to end, same as the BentoPDF verification.
+
+## Phase 8t — Stale "Upgrade complete" toast on every reload, swipe reliability
+
+**"Upgrade complete" replaying on every page reload, and stale package
+counts after a real upgrade** - both traced to the same root cause,
+confirmed via a real device screenshot showing the toast stuck on-screen
+overlapping the ACTIVE SERVICES grid. `UPDATE_STATE["done_ok"]` on the
+server is a *persistent* "what happened last time" flag - it stays `true`
+(or `false`) forever after an upgrade finishes, only resetting when the
+*next* upgrade starts. `pollUpgradeStatus()` runs unconditionally on
+every page load (to correctly resume showing "Updating..." if one is
+genuinely still in flight after a reload mid-upgrade) - but it was also
+unconditionally replaying the completion toast every time it saw
+`done_ok: true`, which after any successful upgrade is *every single
+reload from then on*, not just the one that actually just finished.
+Fixed by tracking whether this poll chain has actually observed a
+running state before treating a "not running" response as something
+worth announcing (`sawUpgradeRunning` flag) - a fresh page load
+discovering an already-settled result now stays silent, while reloading
+mid-upgrade still correctly resumes polling and announces the result
+once it actually completes.
+
+**Second half of the same report** - "takes a while to update but
+dashboard still shows there's an update available" - the completion
+handler was calling `checkUpdates()`, which reads `UPDATE_CHECK_CACHE`
+(only refreshed every 30 minutes by the background loop). The moment
+right after an upgrade finishes is exactly when that cache is guaranteed
+to be stale - it still reflects the pre-upgrade package count. Switched
+to `recheckUpdates()`, which does a live `apt-get update` and also
+refreshes the shared cache, so the count is accurate immediately instead
+of up to 30 minutes late.
+
+**Tab-switching feeling unreliable / dashboard feeling "not smooth"** -
+one root cause again, not two separate problems. `.tab` sets
+`touch-action: pan-y` specifically so our own JS handles horizontal
+swipe gestures instead of fighting the browser's native scroll - but
+that also means a swipe that fails our detection thresholds doesn't fall
+back to *any* native behavior, it just does nothing. The original
+thresholds (70px minimum, and horizontal movement needing to be 1.5x
+vertical movement) were strict enough that a normal hand's natural arc
+during a swipe - some vertical drift is unavoidable - regularly failed
+to register, which reads as "the dashboard is unresponsive" rather than
+"that gesture wasn't recognized." Loosened to 45px / 1.1x, and added a
+600ms max-duration guard (using timestamps captured on touchstart/
+touchend) so a slow drag still doesn't get misread as a swipe in the
+other direction now that the ratio is more forgiving.
+
+No backend changes this batch - `static/app.js` only. Standard `bash
+~/pi-control/deploy-pi-control.sh`.
