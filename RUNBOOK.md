@@ -1376,3 +1376,74 @@ better track record here.
 
 No `picontrol.service` changes - the systemd unit itself doesn't change,
 only what's installed underneath it.
+
+## Phase 8v — In-browser EPUB reader (epub.js), no phone app needed
+
+**Why**: after Phase 8u shipped, the user had to install a separate EPUB
+app on their phone just to open a saved article - defeating the "way
+easier" point of the whole pipeline. Asked for an open-source, Pi-
+installable way to open an EPUB straight from the dashboard.
+
+**Tool choice**: `epub.js` (npm `epubjs`) + its zip dependency `jszip` -
+a client-side-only EPUB renderer, ships pre-built minified bundles with
+no build step. Deliberately not `calibre-web` (a full self-hosted
+ebook-library service with its own persistent backend process) - same
+"prefer zero-backend-cost static tools over a running service" call
+already made for BentoPDF/OmniTools (Phase 8r/8s) and against Actual
+Budget (parked for this same Pi Zero). Nothing runs server-side for this
+feature beyond serving two static JS files and one template - the actual
+EPUB parsing/pagination happens entirely in the visiting browser.
+
+**Vendoring**: this agent's own sandbox blocks fetching from CDNs
+(`cdn.jsdelivr.net` etc, same recurring restriction hit all session for
+various domains) but allows `registry.npmjs.org`, so `npm pack epubjs
+jszip` pulled the real published tarballs, which were then extracted
+locally to grab the pre-built `dist/epub.min.js` (224KB) and
+`dist/jszip.min.js` (98KB) - spot-checked as genuine, non-truncated
+minified bundles before vendoring. Dropped into `static/vendor/`
+alongside the existing Chart.js bundle, same pattern, no npm/build
+tooling needed on the Pi itself.
+
+**New route** `GET /reader` - returns `templates/reader.html`, a
+standalone full-page view (not part of the tabbed dashboard shell).
+Automatically login-gated like every other route (no exemption added),
+confirmed via a test client hit while unauthenticated (302 to
+`/login`).
+
+**`reader.html`**: loads `jszip.min.js` then `epub.min.js`, reads the
+`file` query param client-side, does
+`ePub('/epubs/' + encodeURIComponent(file))` -> `.renderTo('viewer',
+{width:'100%', height:'100%'})` -> `.display()`. Title bar populates
+from `book.loaded.metadata`. PREV/NEXT buttons plus ArrowLeft/ArrowRight
+keyboard handlers call `rendition.prev()/.next()`. No new backend
+surface - `/epubs/<filename>` already existed and is already
+path-traversal-safe via `send_from_directory` (Phase 8u), so epub.js is
+just another client of a route that was already safe to expose.
+
+**`loadEpubs()` update** (`app.js`): each saved EPUB now shows a `Read
+→` link (`/reader?file=...`, opens in a new tab) next to the existing
+`Download →` link.
+
+**Polish**: registered `application/epub+zip` for `.epub` via
+`mimetypes.add_type()` near app startup, since Python's default
+`mimetypes` table doesn't necessarily know that extension - affects the
+`Content-Type` header on `/epubs/<filename>`, though epub.js's own
+JSZip-based fetch-and-parse doesn't actually depend on it.
+
+**Verification**: `python3 -m py_compile app.py` and `node --check
+static/app.js` both clean. Ran a real Flask test-client smoke test (in a
+throwaway venv with flask/feedparser/trafilatura/psutil installed) -
+confirmed authenticated `GET /reader` returns 200 with both vendor
+`<script>` tags and the `ePub(` call present in the response body,
+`GET /reader?file=test.epub` also returns 200 (file existence isn't
+checked server-side, by design - epub.js handles a missing/bad file
+client-side via the `#reader-error` fallback), and unauthenticated
+`GET /reader` redirects to `/login` exactly like every other route.
+Diffed the full working tree against the last committed tarball before
+repackaging - confirmed the only changes were the two new `import`/
+route lines and mimetype registration in `app.py`, the `loadEpubs()` Read
+link in `app.js`, and the three new vendor/template files, nothing else
+moved.
+
+No `picontrol.service` or Samba changes needed - this feature is pure
+addition on top of the Phase 8u pipeline.
