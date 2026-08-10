@@ -1632,3 +1632,61 @@ Scope stays as-is: full extraction works for non-paywalled Medium posts
 site a direct fetch or the Jina fallback can reach; Partner-Program
 Medium posts will only ever yield their free preview through this tool,
 by design.
+
+## Phase 9 — Removed the RSS reader / article-to-EPUB pipeline entirely
+
+**Why**: the feature (Phases 8u-8z) was built around reading saved
+articles, but the one concrete article the user wanted to read on it hit
+Medium's member paywall (8z) - genuinely unfixable without paywall
+circumvention, which was explicitly declined (including a follow-up ask
+about a Freedium-style Googlebot-spoofing bypass - also declined, same
+reasoning). With that closed off, the user asked to remove the tab and
+its code rather than keep unused surface area around.
+
+**Removed**:
+- `app.py`: the entire RSS/EPUB pipeline block (`ARTICLES_DIR`,
+  `_slugify`, `_TRAFILATURA_CONFIG`, `_fetch_direct`,
+  `_fetch_via_jina_reader`, `_generate_epub`, `_fetch_all_feeds`,
+  `_sample_feeds`, and the `/api/feeds` (GET/POST/delete),
+  `/api/articles` (GET/save), `/api/save-url`, `/api/epubs`,
+  `/epubs/<filename>`, and `/reader` routes), the `_sample_feeds` thread
+  start, the `feeds`/`articles` `CREATE TABLE` statements in
+  `_init_trends_db`, the `mimetypes.add_type` EPUB registration, and the
+  now-unused `calendar`/`mimetypes`/`urllib.request`/`feedparser`/
+  `trafilatura`/`send_from_directory` imports (confirmed via grep each
+  had no other use in the file before removing).
+- `templates/reader.html`, `static/vendor/epub.min.js`,
+  `static/vendor/jszip.min.js`.
+- `templates/index.html`: the `#tab-reading` section and the READ
+  `#tabbar` button.
+- `static/app.js`: `loadReading`/`loadFeeds`/`addFeed`/`deleteFeed`/
+  `loadArticles`/`saveArticle`/`saveArticleUrl`/`loadEpubs`, the
+  `reading` entry in `titles`/`TAB_ORDER`, and the `loadTab` dispatch
+  line.
+
+**Left alone, deliberately** (pre-existing manual one-time setup from
+Phase 8u, not something a code change should silently undo): the Samba
+`[Articles]` share config in `/etc/samba/smb.conf`, the `anon` Samba
+user, `pandoc`/`samba` apt packages, the Python `trafilatura`/
+`feedparser` pip packages, any `.epub` files already sitting in
+`~/Articles`, and any existing `feeds`/`articles` rows already in
+`trends.db` (the tables just stop being created on a fresh install now -
+existing ones aren't dropped). None of this is harmful left in place;
+if you want it fully gone, that's a manual cleanup on the Pi
+(`sudo apt remove pandoc samba`, remove the `[Articles]` block from
+`smb.conf` and `sudo systemctl restart smbd`, `rm -rf ~/Articles`) -
+not doing this automatically since it's a real infrastructure change on
+your device, not just a code revert.
+
+**Verification**: `python3 -m py_compile app.py` and `node --check
+static/app.js` both clean. Grepped the whole codebase afterward for
+`reader`/`reading`/`epub`/`feedparser`/`trafilatura`/`/api/feeds`/
+`/api/articles`/`/api/save-url`/`ARTICLES_DIR` and confirmed zero
+remaining references outside unrelated matches (e.g. "reading the
+process directly"). Ran a real Flask test-client smoke test:
+authenticated `GET /` returns 200 with no `tab-reading` in the body and
+no READ button in the tabbar, and `GET /reader`, `/api/epubs`,
+`/api/feeds`, `POST /api/save-url` (with a valid CSRF token) all
+correctly 404 now. Diffed the full tree against the last committed
+tarball and confirmed the diff was exactly these five files with
+nothing else touched.
