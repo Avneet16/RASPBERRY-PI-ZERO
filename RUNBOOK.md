@@ -1604,3 +1604,31 @@ Medium URL again after redeploying and report back what they get.
 No new dependencies, no new routes - `_generate_epub` is called from the
 same two existing routes (`/api/save-url`, `/api/articles/<id>/save`) as
 before.
+
+## Phase 8z — Medium "cutoff" was the member paywall, not a bug; closing the loop
+
+**Report**: after 8y, that Medium URL now converted successfully (past
+the Cloudflare challenge) but only produced a small top portion of the
+article, not the full text.
+
+Two very different causes could produce that same symptom - Jina's
+headless render not waiting for lazy-loaded content, or the article
+genuinely being a Medium Partner Program (member-only) post where even
+a real logged-out browser only ever sees a free preview. These need
+opposite responses (a rendering tweak vs. not touching it at all), so
+rather than guess a third time, asked the user to open the same URL in
+an ordinary logged-out browser tab and check whether it also cuts off at
+a "Member-only story" banner. Confirmed: yes, same cutoff.
+
+**Conclusion**: not a bug. The pipeline is extracting exactly what's
+actually publicly served - the free preview - because that's genuinely
+all a non-member gets, full stop. No code change made, and none should
+be: getting the rest would require an authenticated Medium session
+(login credentials/cookies), which is exactly the paywall circumvention
+this whole pipeline was designed from the start to avoid in favor of
+RSS/legitimate access (see the original pipeline rationale, Phase 8u).
+Scope stays as-is: full extraction works for non-paywalled Medium posts
+(the Cloudflare-challenge fix from 8y covers those) and for any other
+site a direct fetch or the Jina fallback can reach; Partner-Program
+Medium posts will only ever yield their free preview through this tool,
+by design.
