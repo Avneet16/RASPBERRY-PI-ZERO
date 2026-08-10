@@ -1490,3 +1490,55 @@ valid non-empty `.epub` came out the other end.
 No frontend changes - same `/api/save-url` and `/api/articles/<id>/save`
 routes, same error contract, just a fetch that now actually succeeds
 against UA-sniffing sites.
+
+## Phase 8x — Same Medium URL still failed after 8w; made the error diagnostic instead of guessing again
+
+**Report**: the exact same "could not download the page" on a specific
+Medium article, even after the browser-UA fix (8w). Tried to reproduce
+directly against the real URL first, via both `curl` and the `WebFetch`
+tool - both come back `EGRESS_BLOCKED`/403 for `medium.com` specifically
+from this agent's sandbox (not the Pi - the Pi has always had normal
+internet access; this is the same sandbox-network restriction hit
+repeatedly all session for other domains). No way to get a real response
+from Medium from inside this environment to confirm what's actually
+happening.
+
+Rather than guess at a second blind fix (Medium's real bot-defense is
+almost certainly more than a User-Agent string - TLS/HTTP fingerprinting
+and JS challenges are common on sites at that scale, and a plain
+`urllib3` GET can't clear those regardless of headers; separately, some
+Medium posts are genuinely member-paywalled and would fail for *any*
+unauthenticated fetch, browser included), changed `_generate_epub` to
+surface the *actual* HTTP status instead of a single flat string, so the
+next failure is diagnosable instead of another guess:
+- non-200 response -> `"could not download the page (site returned HTTP
+  <code>)"` - tells a bot-block (403/429) apart from a dead link (404)
+  apart from a server error (5xx).
+- 200 but suspiciously short/empty body -> `"downloaded the page but it
+  looked empty - likely a login wall, paywall, or JS-only page"` -
+  covers the case where the site returns 200 with a login/JS-shell page
+  instead of a real block, which a bare "could not download" would have
+  hidden.
+
+Implementation: switched from the high-level `trafilatura.fetch_url()`
+(collapses every failure into a bare `None`) to the lower-level
+`trafilatura.fetch_response()`, which keeps `.status` and `.html`
+around.
+
+**Verification**: extended the same local `http.server` fixture from
+8w with three response modes (403, 200-with-login-wall-body,
+200-with-real-article) and ran `_generate_epub()` against each,
+confirming each one now produces its own distinct, correct message
+(`HTTP 403` / `"looked empty"` / a real `.epub`) rather than the same
+generic string for all three. Still could not test against the real
+`medium.com` URL itself from this sandbox - that's the actual gap here.
+
+**Next step, not yet done**: the real fix (if the cause is bot
+fingerprinting rather than a paywall) would most likely need a
+JS-capable fetch path or a service specifically built to get past this
+(e.g. a headless-browser render), which is a meaningfully bigger and
+heavier addition than anything else in this pipeline and wasn't added
+speculatively without confirming it's actually needed. Asked the user to
+run one `curl` command directly on the Pi (real internet access, unlike
+this sandbox) to get the real status/response, so the next fix is
+grounded in an actual observed cause instead of another guess.
