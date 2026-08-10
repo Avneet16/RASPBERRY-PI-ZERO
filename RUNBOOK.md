@@ -1542,3 +1542,65 @@ speculatively without confirming it's actually needed. Asked the user to
 run one `curl` command directly on the Pi (real internet access, unlike
 this sandbox) to get the real status/response, so the next fix is
 grounded in an actual observed cause instead of another guess.
+
+## Phase 8y — Confirmed Cloudflare JS challenge; added a Jina Reader fallback
+
+**Confirmed cause**: the user ran the requested `curl -I` on the Pi
+against the real Medium URL. Response: `HTTP/2 403` with
+`cf-mitigated: challenge`, a Cloudflare-managed JS challenge header
+(Turnstile), plus a CSP naming `challenges.cloudflare.com`. Not a simple
+User-Agent block - this requires executing JavaScript and clearing a
+browser-fingerprint check, which no HTTP client (curl, urllib3,
+trafilatura) can do by sending different headers. The Phase 8w fix
+(rotating browser UAs) genuinely helps against simpler UA-sniffing
+sites, but was never going to be enough for Medium specifically.
+
+**Options weighed with the user** (via AskUserQuestion, since this is a
+real architectural tradeoff, not something to silently pick):
+1. **Add a Jina Reader fallback** - r.jina.ai (Jina AI Reader,
+   open-source: github.com/jina-ai/reader) runs a real browser
+   server-side and returns rendered markdown, free, no API key. Only
+   real drawback: the article URL gets sent to that third party instead
+   of the Pi talking to the site directly.
+2. Leave it as-is and accept Cloudflare-challenge sites don't work.
+3. Run a real headless browser on the Pi itself - rejected without even
+   trying: Chromium alone needs 300-500MB+ RAM and the Pi Zero 2W only
+   has 512MB total, so this would almost certainly starve or crash
+   everything else running on the device.
+
+User picked option 1.
+
+**Implementation**: split the old single fetch+extract block in
+`_generate_epub` into `_fetch_direct()` (unchanged trafilatura pipeline,
+same diagnostic status-aware errors from Phase 8x) and a new
+`_fetch_via_jina_reader()`, tried only when `_fetch_direct()` comes back
+empty. Jina's plain-GET response format is `Title: ...` / `URL Source:
+...` / `Markdown Content:\n<body>` - parsed out with a regex + a
+`str.find()` split, falling back to using the raw response verbatim if
+that marker's ever missing so a format change degrades gracefully
+instead of breaking outright. On success the extracted title/markdown
+feed into the exact same pandoc conversion path as the direct-fetch
+case - no separate code path downstream of the fetch.
+
+**Verification, and its limits**: this agent's sandbox blocks
+`r.jina.ai` too (confirmed via both `curl` and the `WebFetch` tool
+returning `EGRESS_BLOCKED`), so the Jina Reader response format itself
+could only be sanity-checked from documented behavior/training
+knowledge, not fetched and inspected directly - flagging this honestly
+rather than presenting it as fully verified. What *was* tested directly:
+a local `http.server` returning 403 (simulating the Cloudflare block)
+confirmed `_generate_epub` still falls through to the Phase 8x
+diagnostic error when Jina is also unreachable (this test's own call to
+the real `r.jina.ai` failed exactly as expected, given the sandbox
+block, and was caught cleanly by the `try/except` in
+`_fetch_via_jina_reader` rather than propagating), and a mocked
+`urllib.request.urlopen` returning a synthetic Jina-format response
+confirmed the title/markdown-parsing and full pandoc conversion produce
+a valid, non-empty `.epub`. What's still unverified is Jina's *actual*
+live response shape and whether it successfully renders a
+Cloudflare-challenged page end to end - ask the user to try the same
+Medium URL again after redeploying and report back what they get.
+
+No new dependencies, no new routes - `_generate_epub` is called from the
+same two existing routes (`/api/save-url`, `/api/articles/<id>/save`) as
+before.
