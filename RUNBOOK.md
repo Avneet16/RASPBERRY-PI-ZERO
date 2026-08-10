@@ -1447,3 +1447,46 @@ moved.
 
 No `picontrol.service` or Samba changes needed - this feature is pure
 addition on top of the Phase 8u pipeline.
+
+## Phase 8w — Fixed "could not download the page" for Medium (and similar) articles
+
+**Report**: SAVE ARTICLE FROM URL failed on a Medium article with "could
+not download the page." Separately, pasting that same article URL into
+ADD FEED gave "could not parse as an RSS/Atom feed" - a *different,
+correct* error, not a bug: an article page is HTML, not a feed. (Medium
+does publish real feeds, just at a different URL -
+`https://medium.com/feed/@username`, `/feed/<publication>`, or
+`/feed/tag/<tag>` - pasting the article's own URL into ADD FEED will
+never work.)
+
+**Root cause of the actual bug**: read trafilatura's source
+(`downloads.py`) rather than guess - `fetch_url()` sends every request
+with the literal header `User-Agent: trafilatura/2.2.0
+(+https://github.com/adbar/trafilatura)`, and `_is_suitable_response()`
+treats any non-200 response as a failed download with no further
+detail. Medium (and plenty of other sites) block that self-identifying
+scraper UA outright, so every fetch attempt was failing before
+extraction even started - nothing wrong with the article page itself.
+
+**Fix**: build one module-level `ConfigParser` via
+`trafilatura.settings.use_config()`, override its `USER_AGENTS` entry
+with a handful of real desktop-browser UA strings (Chrome/Windows,
+Safari/Mac, Chrome/Linux), and pass it as `config=` on the `fetch_url()`
+call in `_generate_epub()` - `trafilatura`'s own header logic picks one
+at random per request. `extract()`/`extract_metadata()` don't touch the
+network so they're untouched.
+
+**Verification**: didn't trust this against real Medium (the agent
+sandbox blocks fetching arbitrary domains, same restriction hit all
+session) - instead spun up a local `http.server` that mimics the exact
+failure: 403s any request whose User-Agent contains `"trafilatura"`,
+200s everything else with real article HTML. Confirmed
+`trafilatura.fetch_url()` returns `None` against it with the default
+config (reproducing the bug) and returns the full page with the
+browser-UA config (confirming the fix), then ran the real
+`_generate_epub()` end-to-end against the same server and confirmed a
+valid non-empty `.epub` came out the other end.
+
+No frontend changes - same `/api/save-url` and `/api/articles/<id>/save`
+routes, same error contract, just a fetch that now actually succeeds
+against UA-sniffing sites.
