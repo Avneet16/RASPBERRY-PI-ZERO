@@ -1271,3 +1271,108 @@ other direction now that the ratio is more forgiving.
 
 No backend changes this batch - `static/app.js` only. Standard `bash
 ~/pi-control/deploy-pi-control.sh`.
+
+## Phase 8u — RSS reader + article-to-EPUB pipeline, new READ tab
+
+Built the personal-article-aggregator pipeline the user described (fetch
+RSS -> extract clean text -> convert to EPUB -> grab it on an e-reader),
+as a full web UI in the dashboard rather than a terminal/newsboat-driven
+workflow - by explicit choice, confirmed up front since it's a
+significantly bigger build than keeping RSS browsing in the TERMINAL tab.
+
+**Why this was a good fit for the Pi Zero, unlike the recent Node.js/
+Docker attempts**: `pandoc`, `feedparser` (pip), `trafilatura` (pip), and
+`samba` are all long-established packages with solid 32-bit ARM support
+via Raspberry Pi OS's own apt repo and piwheels (the Pi Foundation's own
+prebuilt-wheel mirror specifically so packages like `lxml` - a
+trafilatura dependency - don't need a slow from-source compile on weak
+hardware). None of them run as a heavy persistent service either -
+`pandoc`/`trafilatura` only do work for the few seconds it takes to
+convert one article, not continuously. `newsboat` itself ended up not
+needed at all - since RSS browsing lives in the web UI now, Python's
+`feedparser` replaces its job entirely.
+
+**Pipeline, verified end-to-end before shipping** (real `trafilatura`
+extraction + real `pandoc` conversion tested against hand-built fixture
+HTML/RSS, only the network fetch mocked, since this sandbox's own egress
+policy blocks general web fetching entirely - unrelated to the Pi, which
+has normal internet access):
+1. `trafilatura.fetch_url(url)` downloads the page, `trafilatura.extract(
+   ..., output_format="markdown")` strips nav/ads/sidebars/footers down to
+   clean article text, `trafilatural.extract_metadata()` pulls title/
+   author.
+2. A small markdown file (`# Title` + `*by Author*` + the extracted body)
+   gets written, then `pandoc file.md -o file.epub --metadata title=...`
+   converts it - confirmed via `file` and by inspecting the zip contents
+   that the output is a genuine, correctly-structured EPUB (`content.opf`,
+   `nav.xhtml`, chapter files), not just a renamed text file.
+3. The `.md` intermediate is deleted immediately after conversion - only
+   the `.epub` sticks around in `~/Articles` (`/home/anon/Articles`).
+
+**New sqlite tables** (same `trends.db`, same write-guard as everything
+else): `feeds` (subscribed feed URLs) and `articles` (fetched items,
+deduplicated by URL via `INSERT OR IGNORE`, with a `saved` flag).
+
+**New background loop** `_sample_feeds()` - every ~20min, polls every
+subscribed feed via `feedparser.parse()` and inserts any new entries.
+Wrapped in the same outer-try/log-and-continue pattern as the other five
+sampling loops (Phase 8q), so one broken feed can't kill the whole loop
+or go silently unnoticed.
+
+**New routes**, all running as the unprivileged `anon` user - no sudo
+helper action needed anywhere in this feature, unlike almost everything
+else in this app:
+- `GET/POST /api/feeds`, `POST /api/feeds/<id>/delete` - subscribe/list/
+  remove feeds. (Delete is POST, not the more RESTful DELETE method -
+  deliberately, since the existing CSRF middleware only checks POST
+  requests under `/api/`; a DELETE route would have silently bypassed
+  it. Caught by checking for existing precedent before adding a new HTTP
+  method to this codebase, rather than assumed safe.)
+- `GET /api/articles`, `POST /api/articles/<id>/save` - list fetched
+  articles, convert one to EPUB on demand.
+- `POST /api/save-url` - the same conversion pipeline for any arbitrary
+  URL, bypassing feeds entirely - lets you save an article straight from
+  your phone's browser without needing to have subscribed to its feed.
+- `GET /api/epubs`, `GET /epubs/<filename>` - list and download generated
+  EPUBs (`send_from_directory` handles path-traversal rejection).
+
+**New READ tab**: SAVE ARTICLE FROM URL (paste any link), RSS FEEDS
+(subscribe/manage), LATEST ARTICLES (per-article SAVE AS EPUB button),
+SAVED EPUBS (download links). Feed titles, article titles/summaries, and
+URLs are all external, attacker-influenceable text (same reasoning as
+the WiFi SSID stored-XSS fix, Phase 8q) - run through `esc()` before
+touching `innerHTML`, not trusted directly. Not added to `AUTO_POLL_TABS`
+- re-rendering these lists every 5s would fight anything mid-typed in
+the add-feed/save-url inputs.
+
+**Manual one-time setup required on the Pi** (not automated by
+`deploy-pi-control.sh`, same reasoning as the nginx site work - these
+are rare, one-shot infrastructure changes, not something to script into
+every redeploy):
+```
+sudo apt-get install -y pandoc samba
+/opt/pi-control/venv/bin/pip install trafilatura feedparser
+
+# Samba share so an e-reader can grab EPUBs over the LAN
+sudo tee -a /etc/samba/smb.conf > /dev/null << 'EOF'
+
+[Articles]
+path = /home/anon/Articles
+read only = yes
+browseable = yes
+guest ok = no
+valid users = anon
+EOF
+sudo smbpasswd -a anon
+sudo systemctl restart smbd
+```
+After the pip install, redeploy as usual
+(`bash ~/pi-control/deploy-pi-control.sh`) and restart `picontrol` so the
+new imports actually load. Verify pandoc landed a real armv7 build
+before relying on it (`pandoc --version`) - every other Docker/Node
+attempt this session hit an architecture wall, so confirm rather than
+assume this one is actually clean, even though apt/piwheels have a much
+better track record here.
+
+No `picontrol.service` changes - the systemd unit itself doesn't change,
+only what's installed underneath it.
