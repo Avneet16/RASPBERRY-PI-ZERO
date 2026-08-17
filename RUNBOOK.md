@@ -1939,3 +1939,92 @@ Redeploy once more (`bash ~/pi-control/deploy-pi-control.sh`) - this run
 should finally show the "Installing renew-monitor-cert.sh" step and
 actually install it, since the fix itself needs one old-script run to
 get onto the Pi before it can start protecting future updates.
+
+## Phase 13 — IP geolocation on EGRESS CHECK, and a WEATHER card
+
+**Where this came from**: built a searchable directory ("Patch Panel",
+a separate artifact, not part of this repo) of every API in
+public-apis/public-apis, then a standalone bulk-prober script
+(`probe-apis.py`, sent directly to the user, not part of this repo
+either - a one-off tool, not a persistent feature) that hit all 786
+"no key needed" entries from the real Pi (this agent's own sandbox
+blocks nearly all outbound domains, confirmed again by testing a
+handful of these APIs directly before concluding the probe had to run
+on the Pi instead). Of the 23 that came back as genuinely live JSON
+APIs, most were either irrelevant to this project (currency rates,
+foreign postcodes, academic data) or outright suspicious (several
+recently-added "crypto agent payment" entries explicitly describing
+pay-per-call pricing despite being listed as "no auth needed" - flagged
+as likely spam, not used). Two were real, directly relevant wins:
+`ipinfo.io` (IP geolocation) and Open-Meteo (confirmed live in the
+probe, though under its marketing homepage URL, not the real API
+endpoint the directory should have listed).
+
+**IP geolocation on EGRESS CHECK**: `_geolocate_ip(ip)` (`app.py`) calls
+`ipinfo.io/<ip>/json` (free, no key) and returns a city/country label
+plus ISP org. `/api/net/egress` now calls it for both `direct_ip` and
+`exit_path_ip` and returns `direct_geo`/`exit_geo` alongside the
+existing bare IPs. This isn't just decoration - geolocating *both* IPs
+turns "the number changed" into "the country and ISP actually changed",
+a real confirmation that the exit-node/Proton path is doing what it's
+supposed to (verified in testing: a mock direct IP resolved to Noida,
+India while a mock exit-path IP resolved to Amsterdam under a Proton
+ASN - exactly the kind of contrast this is meant to surface). The
+existing `curl ifconfig.me` direct-IP lookup was pulled out into
+`_direct_public_ip()` so the weather feature below can reuse it. Drive-by
+fix while touching this code: `direct_ip`/`exit_path_ip` (both external,
+attacker-influenceable strings, technically, even if in practice always
+just a dotted IP) now go through `esc()` before hitting `innerHTML` in
+`checkEgress()`, matching the rest of the codebase's standing rule -
+they weren't before.
+
+**WEATHER card** (new, on the OVERVIEW tab): condition/temp/humidity/wind
+from Open-Meteo's real forecast endpoint
+(`api.open-meteo.com/v1/forecast`), free and keyless. Location is a
+one-time lat/lon setting (`weather_lat`/`weather_lon` in the existing
+generic `settings` table, same `_load_setting`/`_save_setting` helpers
+alert thresholds already use) rather than auto-detected fresh on every
+load - IP geolocation is city-level at best and occasionally wrong
+outright, and weather specifically is worth getting right once rather
+than silently drifting if the Pi's apparent location shifts (VPN
+reconnects, ISP reassigns the exit IP, etc). A **DETECT FROM IP** button
+reuses `_geolocate_ip()`/`_direct_public_ip()` to prefill the lat/lon
+inputs as a convenience, but doesn't auto-save - shown back to the user
+to glance at before committing. Numeric WMO weather codes translated to
+plain text (`_WEATHER_CODES`) since Open-Meteo returns a code, not a
+description.
+
+**Deliberately not on the 5s auto-poll cycle**: the OVERVIEW tab already
+refreshes every 5s via `AUTO_POLL_TABS`, which is exactly wrong for this
+- weather doesn't change that fast, and hammering a free/no-key API
+every 5s just because its card happens to live on the auto-polled tab
+would be poor citizenship for zero benefit. `loadWeather()` isn't
+wired into `loadTab()` at all; it runs once at page load and on its own
+independent 15-minute `setInterval`, plus a manual REFRESH button.
+
+**Verification**: `python3 -m py_compile app.py`, `node --check
+static/app.js` both clean. Since every new/changed route shells out to
+`curl` for a real external domain (ifconfig.me, ipinfo.io,
+open-meteo.com) that this sandbox can't reach, verified the full
+request/response/validation logic with a mocked `curl` (and mocked
+`sudo` for the exit-node path) standing in for the real ones: confirmed
+`/api/net/egress` returns correctly-shaped `direct_geo`/`exit_geo` (the
+Noida-vs-Amsterdam case above), `/api/weather` correctly 400s with no
+location set and returns the right condition/temp/humidity/wind once
+one is, `/api/weather/location` GET/POST round-trips correctly and
+rejects both non-numeric and out-of-range lat/lon with 400s, and
+`/api/weather/detect-location` returns the mocked coordinates without
+saving them. Rendered `GET /` while authenticated and confirmed all the
+new WEATHER markup (display card, setup form, both buttons) is present
+in the page. Diffed the full tree against the last committed tarball -
+confirmed exactly `app.py`, `static/app.js`, and `templates/index.html`
+changed, matching what was actually intended.
+
+**Not verified, and can't be from here**: the real `ipinfo.io` and
+Open-Meteo response shapes and rate-limit behavior under actual live
+traffic - the mocked responses were built from the exact JSON fields
+the earlier bulk-probe (Phase 13's own predecessor step) captured from
+these same two services, not independently re-confirmed live. Ask the
+user to redeploy, tap CHECK MY IP to see real geolocation on both
+addresses, and use DETECT FROM IP + SAVE (or type coordinates directly)
+to get the WEATHER card showing real local conditions.
