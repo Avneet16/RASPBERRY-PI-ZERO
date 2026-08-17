@@ -1783,3 +1783,98 @@ renders the resulting shortcut as standalone/app-like on the user's
 specific device and Chrome version - ask them to remove the existing
 shortcut, redeploy, re-add it from Chrome's menu, and confirm it opens
 without the address bar.
+
+**Confirmed working**: the self-signed cert was in fact the whole
+blocker. Chrome's manual "Add to Home Screen" flow doesn't need full
+installability criteria, but "Install" does, and it specifically
+requires a validly-trusted certificate chain - a self-signed one fails
+that check even after the user clicks through the browser's warning.
+Fixed on the real device (MagicDNS + HTTPS Certificates were both
+already enabled in the Tailscale admin console, nothing to change
+there):
+```
+tailscale cert --cert-file /tmp/monitor.crt --key-file /tmp/monitor.key anon.tail8dd783.ts.net
+sudo install -o root -g root -m 644 /tmp/monitor.crt /etc/nginx/ssl/monitor.crt
+sudo install -o root -g root -m 600 /tmp/monitor.key /etc/nginx/ssl/monitor.key
+sudo nginx -t && sudo systemctl reload nginx
+```
+(needed `sudo` on the `tailscale cert` call itself too - plain user
+access got "Access denied: cert access denied".) Since every nginx site
+on this Pi already pointed at this same shared `monitor.crt`/`.key` pair
+(per Phase 8s), this one file swap upgraded pi-control, BentoPDF, and
+OmniTools all at once, with zero nginx config edits. Dashboard now lives
+at `https://anon.tail8dd783.ts.net:9448/` instead of the raw Tailscale
+IP - PWA installs are scoped per-origin, so the old IP-based shortcut
+doesn't inherit this; confirmed on-device that Chrome now offers a real
+"Install" (not falling back to a plain shortcut) and no longer shows a
+cert warning.
+
+## Phase 11 — Automatic renewal for the new Tailscale cert
+
+**Why**: `tailscale cert`-issued certs are real Let's Encrypt certs -
+they expire (~90 days) and don't renew themselves. Left alone, the cert
+Phase 10 just set up quietly breaks HTTPS (and the PWA install) again
+in a few months.
+
+**Added**:
+- `renew-monitor-cert.sh` (deploys to `/usr/local/bin/`) - runs
+  `tailscale cert` to a temp location, diffs the result against the
+  live `/etc/nginx/ssl/monitor.crt` via `cmp`, and only if it actually
+  changed: installs with the same ownership/permissions as the Phase 10
+  manual steps (`root:root`, 644 for the cert / 600 for the key), runs
+  `nginx -t`, and only reloads nginx if that test passes. `tailscale
+  cert` itself only actually reissues near expiry regardless of how
+  often it's called, so running this far more often than strictly
+  necessary is safe - most runs are a same-bytes no-op.
+- `pi-control-cert-renew.cron` (deploys to
+  `/etc/cron.d/pi-control-cert-renew`) - runs it weekly, Sunday 3:17am.
+- `deploy-pi-control.sh`: installs both, same pattern as the existing
+  `pi-control-helper.sh`/`telegram-send.sh` install steps.
+- On any real failure (`tailscale cert` itself failing, or a newly
+  fetched cert somehow failing `nginx -t`), sends a Telegram alert via
+  the existing `telegram-send.sh` in addition to a syslog line via
+  `logger -t pi-control-cert-renew` - reusing the same proactive
+  alerting pipeline the rest of this dashboard already has (Phase 8g),
+  rather than a failure sitting silent in syslog until the cert
+  actually expires months later. A nginx-test failure specifically
+  leaves the new cert files written to disk but does **not** reload
+  nginx - the live process keeps running on its still-valid old cert
+  either way, so this failure mode has zero production impact beyond
+  needing someone to go look at why.
+- Runs entirely as root via cron (root crontab entry) rather than as
+  `anon` - both `tailscale cert` and writing into `/etc/nginx/ssl/`
+  need root regardless, so there's no reason to fight that with the
+  `tailscale set --operator=` escape hatch the CLI suggested during
+  Phase 10's manual run.
+
+**Verification**: since this only touches real infrastructure on the
+Pi (root cron, `/etc/nginx/ssl/`, `tailscale`, `nginx`, `telegram-send.sh`)
+none of which exists in this sandbox, verified the *script's own logic*
+against mocked versions of every external command (`tailscale`,
+`nginx`, `systemctl`, `logger`, `telegram-send.sh`) standing in for the
+real ones, run from a copy of the script pointed at a scratch
+`CERT_DIR` instead of the real `/etc/nginx/ssl/`. Confirmed all four
+paths behave correctly: (1) cert unchanged -> logged as a no-op, no
+install, no reload; (2) cert changed + `nginx -t` passes -> installed
+with correct ownership/perms, nginx reloaded exactly once; (3)
+`tailscale cert` itself fails -> non-zero exit, alerted via both
+`logger` and the Telegram mock, existing cert left untouched; (4) cert
+changed but `nginx -t` fails -> new (bad) cert written to disk but
+reload correctly skipped, alerted via both channels. `bash -n` clean on
+both `renew-monitor-cert.sh` and the updated `deploy-pi-control.sh`.
+Diffed the full tree against the last committed tarball and confirmed
+the only changes were the two new files and the four added lines in
+`deploy-pi-control.sh`.
+
+**Not verified, and can't be from here**: the real `tailscale cert`
+CLI's actual output/exit-code shape (mocked from what was observed
+during the Phase 10 manual run, not independently confirmed against
+live Tailscale infrastructure), and whether cron on this specific Pi OS
+picks up a new `/etc/cron.d/` file without a service restart (standard
+Debian cron does this automatically by checking file mtimes - not
+something to just assume works identically on every install).
+Redeploy, then a soft way to sanity-check without waiting for Sunday:
+`sudo /usr/local/bin/renew-monitor-cert.sh` by hand once, and confirm
+via `journalctl -t pi-control-cert-renew` that it logged a normal
+"cert unchanged, nothing to do" (expected, since Phase 10 just renewed
+it) rather than an error.
