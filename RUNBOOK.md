@@ -2028,3 +2028,80 @@ these same two services, not independently re-confirmed live. Ask the
 user to redeploy, tap CHECK MY IP to see real geolocation on both
 addresses, and use DETECT FROM IP + SAVE (or type coordinates directly)
 to get the WEATHER card showing real local conditions.
+
+## Phase 14 — Weather follows the phone, not the Pi; egress shows a real bug
+
+**Two reports after Phase 13 went live**: (1) weather correctly showed
+real data, but for wherever the *Pi* is - not useful, since a wall-
+mounted/plugged-in Pi never moves but the person looking at the
+dashboard does; (2) EGRESS CHECK showed `Exit-node path: curl: (28)
+Connection timed out after 8002 milliseconds curl_failed_via_tailscale0`
+- the exit-node route itself timing out (a real Tailscale/Proton
+connectivity issue on the device, not something fixed here), but also
+exposing that this diagnostic text was being displayed and geolocated
+as if it were a real IP.
+
+**Weather now prefers the browser's own location.** `_browserLocation()`
+(`app.js`) wraps `navigator.geolocation.getCurrentPosition()` -
+`enableHighAccuracy: false` (city-level is plenty for weather, and
+faster/cheaper than a precise GPS fix), `maximumAge: 10min` (lets the
+browser reuse a recent fix instead of forcing a fresh one on every
+15-minute auto-refresh). `loadWeather()` tries this first and passes the
+coordinates as `?lat=&lon=` on `/api/weather`; only falls back to the
+saved default location (Phase 13's `weather_lat`/`weather_lon` setting)
+if permission is denied, the browser doesn't support it, or it times
+out. The response now includes `"source": "live"` vs `"saved"`, shown
+under the card so it's clear which one is actually in effect. This only
+works at all because of the real Tailscale cert (Phase 10) - the
+Geolocation API is flatly unavailable on an insecure origin, no silent
+fallback, so this literally could not have worked before that fix
+landed. Relabeled the setup form and its DETECT button ("DETECT FROM
+PI'S IP") to make clear that flow is now a fallback, not the primary
+path.
+
+**The diagnostic-text-treated-as-an-IP bug**: `egress-exit` (the sudo
+helper action) deliberately returns text like
+`curl_failed_via_tailscale0` or the raw `curl` stderr instead of an IP
+when the exit-node path is down - by design, so the dashboard can show
+*why* it failed rather than a bare "failed". `_geolocate_ip()` and
+`checkEgress()`'s rendering didn't know the difference and would
+happily try to geolocate that text and display it as if it were a
+value. Added `_looks_like_ip()` (`ipaddress.ip_address()`, already
+imported) as a real validity check - `_geolocate_ip()` now returns
+`None` immediately for anything that doesn't parse as an IP, and
+`/api/net/egress` exposes `direct_ok`/`exit_ok` booleans so the frontend
+can render diagnostic text in the existing pink error color instead of
+presenting it as a normal value.
+
+**Verification**: `python3 -m py_compile app.py`, `node --check
+static/app.js` both clean. Extended the mocked-`curl`/mocked-`sudo` test
+harness from Phase 13 with the exact real-world failure reported -
+`sudo` mock returns the literal
+`curl: (28) Connection timed out after 8002 milliseconds
+curl_failed_via_tailscale0` string for `egress-exit` - confirmed
+`exit_ok` comes back `False`, `exit_geo` comes back `None` (no wasted
+geolocation attempt against garbage text), while the still-good
+`direct_ip` path is unaffected. Confirmed `/api/weather?lat=&lon=`
+returns `source: "live"` with the right data, omitting both params
+falls back to `source: "saved"`, no location at all still 400s, and
+garbage (non-numeric) lat/lon query params correctly fall through to
+the saved default rather than crashing. Rendered `GET /` and confirmed
+the new `weather-source` element and relabeled buttons are present;
+confirmed `app.js` contains the new geolocation code (checked the
+static file directly, not the rendered page - `navigator.geolocation`
+lives in the separate `app.js`, not inline in `index.html`, an actual
+mistake in this verification step's first draft that was caught before
+calling it done). Diffed the full tree against the last committed
+tarball - confirmed exactly `app.py`, `static/app.js`, and
+`templates/index.html` changed.
+
+**Not verified, and can't be from here**: the real browser Geolocation
+permission-prompt flow, and whether the real `egress-exit` timeout is
+transient or an ongoing Tailscale/Proton connectivity problem worth
+separately investigating on the actual device - ask the user to
+redeploy, confirm the WEATHER card now shows their phone's location
+(the browser should prompt for permission on first load) with the
+`weather-source` line correctly reading "Your current location", and
+separately let them know whether the exit-node path is expected to be
+down right now (Proton off? exit-node not currently selected on the
+phone's Tailscale?) or if it's a surprise worth digging into.
