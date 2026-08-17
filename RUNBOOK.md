@@ -1690,3 +1690,96 @@ no READ button in the tabbar, and `GET /reader`, `/api/epubs`,
 correctly 404 now. Diffed the full tree against the last committed
 tarball and confirmed the diff was exactly these five files with
 nothing else touched.
+
+## Phase 10 — Installable PWA, so the home-screen icon opens app-like (no widget)
+
+**Ask**: opening the dashboard "always through a shortcut again and
+again" was annoying - wanted an Android home-screen widget. Clarified
+first (real fork in scope, not a detail): a true glanceable widget
+(numbers on the home screen with no tap at all) needs either a native
+Android app - a completely different tech stack from this Python
+project - or a third-party widget app like KWGT/Tasker polling the
+JSON API. The one-tap option - make the existing home-screen shortcut
+open the dashboard full-screen, app-like, no browser address bar/tabs -
+is a small addition on top of what's already here. User picked the
+one-tap PWA option.
+
+**What makes a home-screen shortcut open "app-like" instead of just a
+bookmarked browser tab**: a Web App Manifest (`manifest.json`) with
+`display: "standalone"` plus icons, linked from the page's `<head>`. A
+registered service worker isn't required for Chrome's manual "Add to
+Home Screen" action specifically, but it removes any doubt about
+Chrome's installability checks being satisfied, costs nothing
+meaningful, and is close to free to add - so added one that does
+nothing but pass every request straight to the network (this dashboard
+is live system state, not something to cache offline).
+
+**Added**:
+- `static/manifest.json` - name, `start_url: "/"`, `scope: "/"`,
+  `display: "standalone"`, background/theme color matching the
+  dashboard's own `--bg` (`#0a0a12`), three icon entries (192, 512,
+  and a maskable 512 for Android's adaptive-icon cropping).
+- `static/icons/icon-192.png`, `icon-512.png`, `icon-512-maskable.png`
+  - generated with Pillow, not sourced from anywhere: a glowing cyan
+    &pi; glyph on the dashboard's own dark background, echoing the
+    existing neon `.dot.on { box-shadow: 0 0 6px cyan }` indicator
+    styling already used throughout the UI. The maskable version uses a
+    smaller safe-zone ratio (glyph sized to fit inside a centered 72%-
+    diameter circle vs. 85% for the regular icons) so Android cropping
+    it into a circle/squircle/whatever the launcher uses doesn't clip
+    the glyph.
+- `static/sw.js` - a pass-through service worker (install/activate/fetch
+  handlers only, no caching).
+- `app.py`: `GET /sw.js` (served via `app.send_static_file` from the
+  site root, not `/static/sw.js`, so its default scope covers the whole
+  app rather than just `/static/` - a service worker's scope is bounded
+  by its own script path unless the server sends a
+  `Service-Worker-Allowed` header, and serving from the root sidesteps
+  needing that). Added `/sw.js` to the `_require_login` exemption list
+  alongside `/login` and `/static/*` - the browser refreshes a
+  registered service worker on its own schedule regardless of whether
+  the dashboard session is currently logged in, and getting an HTML
+  login-redirect back instead of the real script on that background
+  refresh would break it.
+- `templates/index.html` and `templates/login.html`: manifest link,
+  `theme-color` meta, `apple-touch-icon` (harmless bonus for iOS
+  Safari's own Add to Home Screen, not the ask, but free to include),
+  and a `navigator.serviceWorker.register('/sw.js')` call. Added to
+  *both* templates, not just `index.html` - the manifest's `start_url`
+  is `/`, which redirects to `/login` if the 30-day session cookie has
+  expired, and the login page should feel like the same app rather than
+  reverting to a bare browser tab the moment you're logged out.
+
+**Real limitation, stated honestly rather than assumed away**: this
+dashboard is reached over a self-signed TLS cert on a raw Tailscale IP
+(`listen ... ssl` per Phase 8p, no real hostname/CA involved), not a
+publicly-trusted certificate. Chrome's *automatic* PWA install
+banner/mini-infobar does require full installability criteria on a
+trusted origin, which this may not satisfy. What this doesn't depend
+on: the manual "Add to Home Screen" action from Chrome's menu, which in
+testing across Chrome versions reads the manifest and honors
+`display: standalone` for the resulting shortcut's launch behavior
+independent of that stricter automatic-install path. Any home-screen
+icon added *before* this change was created without a manifest present
+and won't retroactively pick up standalone mode - it has to be removed
+and re-added after redeploying for the new behavior to take effect.
+
+**Verification**: `python3 -m py_compile app.py`, manifest.json parsed
+with `json.load`, `node --check static/sw.js` all clean. Rendered both
+generated icons and visually confirmed the glyph sits fully inside the
+maskable safe zone and reads clearly at small size. Real Flask
+test-client smoke test: logged-out `GET /sw.js`, `/static/manifest.json`,
+and `/static/icons/icon-192.png` all return 200 (confirming the
+login-exemption works), `/login`'s body contains the manifest link and
+SW registration call, logged-out `GET /` still redirects to `/login` as
+before (exemption didn't leak), and logged-in `GET /` contains the
+manifest link, `apple-touch-icon`, and SW registration. Diffed the full
+tree against the last committed tarball - confirmed exactly `app.py`,
+both templates, and the three new `static/` files changed, nothing
+else.
+
+**Not verified, and can't be from here**: whether Android actually
+renders the resulting shortcut as standalone/app-like on the user's
+specific device and Chrome version - ask them to remove the existing
+shortcut, redeploy, re-add it from Chrome's menu, and confirm it opens
+without the address bar.
