@@ -1878,3 +1878,64 @@ Redeploy, then a soft way to sanity-check without waiting for Sunday:
 via `journalctl -t pi-control-cert-renew` that it logged a normal
 "cert unchanged, nothing to do" (expected, since Phase 10 just renewed
 it) rather than an error.
+
+## Phase 12 — Fixed deploy-pi-control.sh silently skipping its own new steps
+
+**Report**: ran the redeploy for Phase 11 - it completed clean, service
+started fine, but `renew-monitor-cert.sh` was never actually installed
+(`sudo /usr/local/bin/renew-monitor-cert.sh` came back "command not
+found", `journalctl -t pi-control-cert-renew` had nothing at all).
+
+**Root cause**: `deploy-pi-control.sh` overwrites itself mid-run. It's
+invoked as `bash ~/pi-control/deploy-pi-control.sh` - a stale on-disk
+copy from the *previous* deploy - and partway through, it does `tar
+xzf ~/pi-control.tar.gz -C ~` which extracts a fresh
+`deploy-pi-control.sh` over that exact same path. bash reads a script's
+content before executing it, so the already-running process kept going
+on its old in-memory copy of the script and finished normally -
+completely skipping the newly-added cert-renewal install step, since
+that process never saw it existed. This isn't specific to that one
+step - *any* step added to this script will silently not run on the
+first deploy after being added, forever, until this is fixed.
+
+**Reproduced deliberately before trusting the diagnosis**: wrote a
+throwaway script that prints a step, overwrites its own `$0` mid-run via
+a heredoc, then tries to print more old-content steps - confirmed the
+already-running process doesn't pick up the new content (it didn't even
+finish printing its own remaining old-content lines, consistent with
+bash having only buffered part of the file before the overwrite
+disrupted the read) - and confirmed a *second*, separate invocation
+does correctly see the new content. Matches exactly what was observed
+on the real Pi: the run completed using full old-script behavior,
+simply missing the one step that didn't exist in the version this
+process had already read.
+
+**Fix**: added a guard right after `cd "$HOME"` - extract the tarball,
+then `exec bash "$HOME/pi-control/deploy-pi-control.sh" "$@"` to
+relaunch from the just-extracted (now current) copy, gated by a
+`PI_CONTROL_DEPLOY_REEXECED` env var so it only happens once. Every step
+after that point runs from a freshly-read, guaranteed-current file, in
+the same single `bash ~/pi-control/deploy-pi-control.sh` invocation the
+user already runs - no workflow change needed, no "run it twice" advice
+to remember for every future update.
+
+**Verification**: reproduced the underlying bug first (above), then
+verified the fix against the *exact same* reproduction shape (old
+content overwriting itself, guarded re-exec added) and confirmed a
+single invocation now correctly runs the new content instead of the
+old. Beyond that isolated mechanism check, ran the real, unmodified
+`deploy-pi-control.sh` end-to-end against a fully mocked environment
+(fake `$HOME`, a real tarball built from the current source tree, mocked
+`sudo`/`systemctl`/`chown` so nothing touched real system state
+destructively) and confirmed: "Extracting pi-control archive" prints
+exactly once (no re-exec loop), every step through "Installing
+renew-monitor-cert.sh + its weekly cron job" actually runs, the files
+land where expected, and `systemctl stop/start picontrol` each fire
+exactly once (no duplicate stop/start from the re-exec). `bash -n`
+clean. Diffed the full tree against the last committed tarball -
+confirmed `deploy-pi-control.sh` was the only file that changed.
+
+Redeploy once more (`bash ~/pi-control/deploy-pi-control.sh`) - this run
+should finally show the "Installing renew-monitor-cert.sh" step and
+actually install it, since the fix itself needs one old-script run to
+get onto the Pi before it can start protecting future updates.
