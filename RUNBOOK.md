@@ -2105,3 +2105,72 @@ redeploy, confirm the WEATHER card now shows their phone's location
 separately let them know whether the exit-node path is expected to be
 down right now (Proton off? exit-node not currently selected on the
 phone's Tailscale?) or if it's a surprise worth digging into.
+
+## Phase 15 — Bottom tab bar replaced with a left side drawer
+
+**Ask**: now that this installs as a real standalone PWA (Phase 10), it
+should feel like an app, not a mobile website - specifically wanted the
+old bottom tab bar reworked. Talked through the tradeoffs first (native
+bottom bars usually cap at ~5 icons; this dashboard has 8 tabs, already
+needing horizontal scroll to fit) - user's own call once it came up:
+skip the bottom bar entirely, go with a side drawer opened by a 3-dot
+menu button instead. That sidesteps the tab-count problem outright - a
+vertical list has room for any number of tabs without scrolling to find
+one, which a bottom bar never would.
+
+**What changed**: `#tabbar` (bottom, `position:fixed`, horizontally
+scrolling) is gone, replaced by `#nav-drawer` (left, `position:fixed`,
+`transform: translateX(-100%)` sliding to `translateX(0)` when
+`.open`), a `#nav-scrim` dimming overlay behind it, and a small 3-dot
+(`&#8942;`, the actual Unicode vertical-ellipsis character - no icon
+asset needed) menu button added to the header. Drawer items reuse the
+exact same `data-tab` attributes and `activateTab()` logic as the old
+bottom buttons - only the container and layout changed, not the
+tab-switching mechanism itself. `activateTab()` now also closes the
+drawer, so picking a destination feels like a single action instead of
+"pick, then separately dismiss the menu." Closing works three ways -
+tapping a nav item, tapping the scrim, and Escape - all verified.
+Labels expanded from the bottom bar's cramped abbreviations (SYS, NET,
+DISK, SEC) to the full names already used elsewhere in the app (the
+existing `titles` map's values), since a drawer has the width to spare
+and abbreviations only existed to fight the old bar's cramped space.
+
+Drive-by cleanup now that nothing sits fixed at the bottom of the
+screen: `body`'s `padding-bottom` (previously reserving space for the
+tab bar) and `#toast`'s `bottom` offset (previously positioned just
+above it) both now just use `env(safe-area-inset-bottom, 0px)`-aware
+minimal spacing instead. Header and drawer both add
+`env(safe-area-inset-top/bottom)` padding too, so none of this collides
+with a phone's notch or gesture-nav bar - relevant now specifically
+because Phase 10 made this an installed, chrome-less PWA where those
+safe areas are actually visible, unlike a normal browser tab.
+
+**Swipe-to-switch-tabs (Phase 8t) still works**, updated to query
+`#nav-drawer button.active` instead of the removed `#tabbar`, plus a
+new guard that ignores swipes entirely while the drawer is open (it's
+its own interaction surface, not the underlying tab content).
+
+**Verification**: `node --check static/app.js` clean. Grepped all three
+changed files for any leftover `tabbar` reference after the rename -
+found and fixed one in the 5s auto-poll interval's active-tab lookup
+that a first pass missed (would have thrown on every poll tick once
+`#tabbar` no longer existed - caught before shipping, not after).
+Beyond static checks, actually ran the real Flask app under Playwright
+against headless Chromium (both pre-installed in this environment) on a
+390&times;844 mobile viewport, logged in for real, and screenshotted
+the closed state, the open drawer, and the state right after tapping a
+nav item - confirmed visually that the drawer slides in correctly, the
+active tab is highlighted, the scrim dims the background, and selecting
+LIVE NETWORK both closes the drawer and swaps the content. Separately
+scripted and confirmed all three close paths (nav-item tap, scrim tap,
+Escape key) actually flip `#nav-drawer`'s `open` class and restore
+`document.body.style.overflow`, not just that they don't throw. Diffed
+the full tree against the last committed tarball - confirmed only
+`static/app.js`, `static/style.css`, and `templates/index.html`
+changed; `app.py` untouched, as expected for a pure frontend nav
+change.
+
+**Not verified, and can't be from here**: real-device feel (transition
+smoothness on the Pi Zero's target hardware class of phone, whether
+78vw/280px drawer width feels right on the user's actual screen size) -
+ask them to redeploy and try it.
