@@ -2174,3 +2174,103 @@ change.
 smoothness on the Pi Zero's target hardware class of phone, whether
 78vw/280px drawer width feels right on the user's actual screen size) -
 ask them to redeploy and try it.
+
+## Phase 16 — UNBOUND INTERNALS panel, from researching ar51an/unbound-dashboard
+
+**Where this came from**: user pointed at
+github.com/ar51an/unbound-dashboard and asked if it could be built into
+this dashboard. Cloned and read it - it's not one app, it's a full
+observability stack (Grafana + Prometheus + Loki + Promtail + a custom
+Go exporter) built for a Pi 4 with several GB of RAM. Recommended
+against building that literally: Grafana alone typically wants
+150-250MB, and this Pi has ~425MB total already running AdGuard,
+Unbound, Vaultwarden, Tailscale, nginx, fail2ban, BentoPDF, OmniTools,
+and picontrol - it would not fit. Also flagged that their per-client/
+per-domain/blocked-query panels get their data from Unbound's own
+logs, because *their* setup has Unbound doing the blocking - on this
+Pi, AdGuard Home does the blocking and already exposes that same kind
+of data through its own UI, so replicating it here would just be a
+weaker copy of a tool the user already has, not new value. What
+doesn't overlap with AdGuard at all: Unbound's own internal resolver
+performance (cache efficiency, recursion latency, request-list health)
+- AdGuard has no visibility into any of that. Scoped down to just that,
+with the user's explicit agreement.
+
+**Real output checked before writing any parsing code**: asked the user
+to run `sudo unbound-control stats_noreset` (the exact command the
+existing hit-rate card already calls) and paste the real result, rather
+than build against assumed field names from general Unbound docs and
+risk silently-wrong output. Turned out this Unbound doesn't have
+`extended-statistics: yes` set, so the richer breakdowns (query types,
+response codes, the response-time histogram, cache memory) genuinely
+aren't available yet - only the base counters are. Scoped the panel to
+exactly what's actually there rather than build for fields that don't
+exist on this install: total queries, cache hits/misses (already used),
+prefetch, expired, recursive replies, rate-limited/timed-out counts,
+recursion time avg/median, request-list avg/max/exceeded, resolver
+uptime, and a live thread count (counted from however many distinct
+`threadN.` prefixes are actually present, not hardcoded to a specific
+number),
+
+**Added**:
+- `_parse_unbound_stats(raw)` (`app.py`) - replaces the old 6-line inline
+  hits/misses-only parse in `_sample_slow` with a real parser pulling
+  all of the above, using a small `g(key, cast, default)` helper so a
+  missing/renamed field degrades to a default instead of crashing (the
+  existing `hit_rate`/`hits`/`misses` keys are unchanged, so the OVER
+  tab's existing UNBOUND DNS card keeps working with zero changes).
+  Verified field-by-field against the user's actual pasted output before
+  moving on, not just eyeballed.
+- New `unbound_trends` table (same `trends.db`, same write-guard
+  pattern as the existing `trends`/`settings`/`alert_history` tables) +
+  `_persist_unbound_trend_sample()`, written every 20th `_sample_slow`
+  tick (~5min, matching the existing long-trends table's resolution) so
+  recursion latency has a real history to chart, not just a live
+  number.
+- `/api/unbound/trends?hours=N` (capped at `TRENDS_RETENTION_DAYS`&times;24,
+  same bounds-clamping pattern as `/api/trends/long`) and
+  `unbound: CACHE["unbound"]` added to the existing `/api/sys` response
+  - no new polling loop needed, SYS already auto-polls every 5s.
+- **New UNBOUND INTERNALS card** (SYS tab, after TOP MEMORY HOGS) - a
+  stat-tile grid for everything above, plus a note that query-type/
+  response-code breakdowns need `extended-statistics: yes` turned on
+  (not done - a separate ask, not assumed).
+- **New RECURSION LATENCY (6HR) chart** - a Chart.js line chart
+  (avg + median, cyan/orange to match the existing trend charts) fed by
+  the new trends endpoint, built with the exact same
+  create-once/update-in-place pattern and 60s refetch throttle as the
+  existing `loadLongTrends()`, just pointed at the new endpoint instead
+  of duplicating the pattern differently.
+
+**Verification**: `python3 -m py_compile app.py`, `node --check
+static/app.js` both clean. Ran `_parse_unbound_stats()` directly against
+the user's real pasted `stats_noreset` output (not a hand-built fixture)
+and asserted every single output field against hand-computed expected
+values, including the uptime formatting (240442.889029s &rarr; "2d 18h
+47m") and the thread count correctly coming back `1` (this install only
+showed `thread0.*`, unlike ar51an's 4-thread example - confirms the
+count is genuinely derived, not copied from their example). Full Flask
+test-client pass: seeded `CACHE["unbound"]` and a persisted trend row,
+confirmed `/api/sys` includes the new `unbound` block with correct
+values, `/api/unbound/trends` returns the seeded row with correct
+fields, and a garbage `?hours=` value falls back to the 6h default
+instead of 500ing. Rendered `GET /` and confirmed the new card, all
+twelve stat-tile IDs, and the new canvas are present. Diffed the full
+tree against the last committed tarball - confirmed exactly `app.py`,
+`static/app.js`, and `templates/index.html` changed.
+
+**Not done, deliberately, pending a separate answer**: enabling
+`extended-statistics: yes` in `/etc/unbound/unbound.conf` (needed for
+the query-type/response-code/histogram breakdowns this panel doesn't
+show yet) - that's a real edit to a production DNS resolver's config
+plus a restart, so it gets asked about on its own rather than folded
+into this change.
+
+**Not verified, and can't be from here**: whether `_sample_slow`'s
+existing 5s sudo-helper timeout comfortably covers `unbound-control
+stats_noreset` on the real device under real load (the parse itself is
+cheap; the risk, if any, is entirely in the existing subprocess call
+this change didn't touch), and how the new chart/tiles actually look
+against real historical data once the 5-minute trend table has enough
+rows to plot a real line - ask the user to redeploy and check back in a
+few hours once there's more than one data point.
