@@ -2354,3 +2354,89 @@ and `templates/index.html` changed.
 actual phone screen/brightness rather than a synthetic 390&times;1100
 headless render - ask them to redeploy and confirm it actually reads
 better this time.
+
+## Phase 18 — extended-statistics enabled; query types, response codes, histogram
+
+**User enabled `extended-statistics: yes`** in `/etc/unbound/unbound.conf`
+themselves - checked for an existing directive first (none), backed up
+the config, inserted the line with `sed -i '/^server:/a\    extended-
+statistics: yes'`, validated with `unbound-checkconf` before touching
+the running service (came back clean), restarted, and confirmed
+`num.query.type.*` fields appeared. Then pasted the full real
+`stats_noreset` dump with extended stats on, so this phase's parser
+could be built and verified against actual field names/values rather
+than general Unbound documentation, same discipline as every prior
+phase touching this panel.
+
+**New fields surfaced**, all parsed dynamically (no hardcoded type/code
+lists, so whatever query types or response codes actually occur just
+show up - confirmed by testing against the real dump, which only had
+A/AAAA/HTTPS and NOERROR/nodata present, not the full standard set):
+- `query_types` / `response_codes` - built from any `num.query.type.*` /
+  `num.answer.rcode.*` key present with a non-zero count.
+- `histogram` - Unbound's 52 fine-grained buckets (microsecond
+  resolution at the low end) collapsed into 6 human-scaled ranges
+  (`<1ms` through `>10s`) by parsing each bucket key's upper bound and
+  summing into whichever range it falls under.
+- `cache_mem_kb` (sum of all `mem.*` byte counters) and `cache_entries`
+  (msg/rrset/infra/key cache entry counts).
+- `unwanted_queries`/`unwanted_replies` (dropped as unwanted - a real
+  security-relevant counter) and `secure_answers`/`bogus_answers`
+  (DNSSEC validation outcomes).
+- `extended: bool` - `True` only when `mem.cache.rrset` is present in
+  the output, so the frontend can tell a genuinely-extended dump apart
+  from a base one without needing its own separate config check.
+
+**New UI**: two donut charts (QUERY TYPES, RESPONSE CODES) and a bar
+chart (RESPONSE TIME DISTRIBUTION), plus two more stat groups (CACHE
+MEMORY, SECURITY) inside the existing UNBOUND INTERNALS card. All of it
+- the three new cards and the two new stat groups - stays hidden
+(`display: none`) unless `ub.extended` is true, rather than showing
+permanent `--` placeholders when it isn't; the old "enable extended-
+statistics" note does the reverse (hidden once it's on, shown when it
+isn't) instead of both being visible/stale at once.
+
+**Real bug caught by actually rendering the chart, not just reading the
+diff**: the histogram bars came out in alphabetical order
+(`1-10ms, 1-10s, 10-100ms, 100ms-1s, <1ms, >10s`) instead of the
+intended small-to-large latency order. Root cause: Flask 3.1.3 sorts
+JSON object keys alphabetically by default (confirmed directly -
+`jsonify({"<1ms":0,...})` came back with keys resorted), so returning
+the histogram as a Python dict threw away the deliberate insertion
+order the moment it crossed the JSON boundary, even though the dict
+itself was correctly ordered right up until serialization. Fixed by
+returning `histogram` as a list of `{"label", "count"}` objects instead
+of a dict - a JSON array has no keys to sort, so order survives
+regardless of Flask's dict-sorting default. `query_types`/
+`response_codes` were left as dicts since (unlike the histogram) there's
+no inherently "correct" order for those to begin with - alphabetical is
+merely arbitrary there, not wrong.
+
+**Verification**: `python3 -m py_compile app.py`, `node --check
+static/app.js` both clean. Verified the parser field-by-field against
+the user's real extended-stats dump (query types, response codes,
+histogram bucket sums, cache memory/entries, unwanted/DNSSEC counters)
+with hand-computed expected values, and separately re-confirmed the
+Phase-16 non-extended sample still parses with `extended: False` and
+none of the new keys present - this change doesn't regress the base
+case. The histogram ordering bug was caught by actually rendering the
+chart in a real (headless) browser via Playwright and looking at it -
+not something a unit test on the Python function alone would have
+caught, since the bug only exists at the Flask JSON-serialization
+boundary. After the list-based fix, re-verified three ways: the
+Python-level object has correct order, a real `flask.jsonify()` call
+round-tripped through `json.loads()` preserves that order, and the live
+rendered Chart.js instance's `.data.labels` (read directly out of the
+running page via Playwright, not just asserted from the source) matches
+`["<1ms","1-10ms","10-100ms","100ms-1s","1-10s",">10s"]` exactly.
+Screenshotted all three new cards and confirmed the donuts, histogram,
+and new stat groups all render correctly with real data, and that the
+old "not enabled yet" note is gone now that `extended` is true. Diffed
+the full tree against the last committed tarball - confirmed exactly
+`app.py`, `static/app.js`, and `templates/index.html` changed.
+
+**Not verified, and can't be from here**: how this looks on the user's
+real phone once real (not synthetic/seeded) query-type and response-
+code diversity accumulates over normal usage - ask them to redeploy and
+check back once there's more than 13 total queries' worth of data to
+look at.
