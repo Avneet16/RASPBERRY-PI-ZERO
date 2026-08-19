@@ -2274,3 +2274,83 @@ this change didn't touch), and how the new chart/tiles actually look
 against real historical data once the 5-minute trend table has enough
 rows to plot a real line - ask the user to redeploy and check back in a
 few hours once there's more than one data point.
+
+## Phase 17 — UNBOUND INTERNALS redesign after real-device feedback
+
+**Report**: real screenshot from the Pi after Phase 16 - functionally
+correct, but "not that good" visually. Three concrete problems visible
+in the screenshot, not vague:
+1. The recursion-latency chart's two lines sat pinned flat near the top
+   of the chart with barely any visible shape - `scales: { y: { min: 0
+   } }` forced a 0 baseline onto a metric (latency in ms) with no
+   natural 0-100 range, unlike the CPU/RAM percentage charts that
+   pattern was copied from, so real ~250-350ms movement got squashed
+   into the top 30% of the chart.
+2. All 12 stats sat in one flat 2-column grid, every number the same
+   size and color - nothing told you which 2-3 numbers actually matter
+   at a glance.
+3. The "extended-statistics: yes" note rendered visibly larger than the
+   text around it - wrapped in a bare `<code>` tag with no styling
+   anywhere in style.css, so it fell back to the browser's default
+   monospace size against the `.sub` class's deliberately-shrunk
+   0.75rem text.
+
+**Fixes, in the same three spots**:
+- Chart: dropped the `min: 0` constraint (`beginAtZero: false` instead,
+  letting Chart.js auto-scale to the actual data range), added a subtle
+  area fill under each line (`fill: true` + a low-alpha version of each
+  line's own color), and a scriptable `pointRadius` that only draws a
+  marker on the single most recent point per line - draws the eye to
+  "where things stand right now" without cluttering the rest of the
+  line. Legend switched to `usePointStyle: true` (small circles instead
+  of Chart.js's default rectangle swatches) - scoped to just this
+  chart's own options object, not the shared CPU/RAM charts, so it
+  doesn't second-guess an established pattern used elsewhere without
+  being asked to.
+- Stat grid: restructured into a hero row (Cache Hit Rate, Recursion
+  Avg - full `.big` size) plus three labeled secondary groups (CACHE /
+  LATENCY / HEALTH, using a new small-caps `.group-label` divider) with
+  smaller `.big.small` tiles. Combined naturally-paired stats into
+  single tiles (`3.83 / 63` for request-list avg/max, `0 / 0` for
+  rate-limited/timed-out) to cut 12 separate numbers down to a scannable
+  8. Total queries and resolver uptime moved into a single caption line
+  under the hero row instead of taking two more full tiles.
+- Color now encodes health, not just decoration: cache hit rate turns
+  green at &ge;85%, pink below 60% (a new `.big.pink` class, mirroring
+  the existing `.big.green`). Rate-limited/timed-out stays neutral at
+  zero (the boring, expected case) and only turns pink when either is
+  actually non-zero - the opposite convention from hit rate, deliberately,
+  since for these two "high number = good" is backwards.
+- `<code>` replaced with `<strong>` plus a new `.sub strong { color:
+  var(--text); font-weight: 700; }` rule, so emphasis reads as brighter/
+  bolder text at the *same* size as its sentence instead of an
+  oversized, unstyled tag.
+
+**Verification**: `python3 -m py_compile app.py`, `node --check
+static/app.js` both clean (app.py itself is untouched - this was a pure
+CSS/HTML/JS visual pass, no backend logic changed). Rather than trust
+the fix from reading the diff, actually re-ran the same
+Playwright-against-a-live-Flask-instance approach from Phase 15,
+this time seeding *realistic* data instead of empty defaults: a fake
+`subprocess.run` stand-in returned real-looking `unbound-control`
+output so the actual `_sample_slow` background thread populated
+`CACHE["unbound"]` the normal way (an earlier attempt that just poked
+`CACHE["unbound"]` directly from outside the running process got
+overwritten by that same thread within seconds - a real, if
+sandbox-only, race worth noting for the technique itself), and 72 rows
+of synthetic recursion-latency history (6 hours at 5-minute resolution,
+randomized within a realistic 300-400ms band) were inserted directly
+into `unbound_trends` before launch. The resulting screenshot confirmed
+all three fixes visually: the chart shows real jagged movement with a
+visible fill and endpoint dots instead of a flat line, the hero stats
+(87.2% in green, 348.4ms) are clearly the first thing the eye lands on
+against the smaller grouped tiles below, and the extended-statistics
+note now reads as one consistently-sized sentence with bold emphasis
+rather than a jarring size jump. Diffed the full tree against the last
+committed tarball - confirmed only `static/app.js`, `static/style.css`,
+and `templates/index.html` changed.
+
+**Not verified, and can't be from here**: how this reads on the user's
+actual phone screen/brightness rather than a synthetic 390&times;1100
+headless render - ask them to redeploy and confirm it actually reads
+better this time.
