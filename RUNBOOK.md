@@ -2440,3 +2440,79 @@ real phone once real (not synthetic/seeded) query-type and response-
 code diversity accumulates over normal usage - ask them to redeploy and
 check back once there's more than 13 total queries' worth of data to
 look at.
+
+## Phase 19 — OSINT TOOLS tab, running the personal-use toolkit from the dashboard
+
+**Ask**: after manually installing a personal-use OSINT toolkit
+directly on the Pi (sherlock, holehe, maigret, socialscan, h8mail,
+ghunt, subfinder, assetfinder, gau, waybackurls, httprobe, httpx,
+theHarvester, Photon, recon-ng, sn0int - a separate, lengthy install
+effort not tracked in this file since it's Pi-side tooling, not
+dashboard code), user asked to run these from a new dashboard page
+instead of SSHing in from a phone every time, with failures shown
+directly on the page instead of needing to go find them in a terminal.
+
+**What changed**: new OSINT TOOLS tab (`#tab-osint`), added to the nav
+drawer after SECURITY. A `<select>` lists the available tools (fetched
+from `/api/osint/tools`), a text input takes the target (its
+placeholder swaps to match the selected tool's expected input - a
+username, an email, a domain, or a URL), and a RUN button starts it.
+Output renders in a `.log-box` matching the SERVICE LOGS/SECURITY tabs'
+existing style; a failed run additionally gets a new `.log-box.error`
+style (pink border/text, matching `#toast.error`) so a failure is
+visually obvious at a glance, not just readable in the text.
+
+Backend mirrors the existing system-update background-job pattern
+(`UPDATE_STATE`/`UPDATE_LOCK`) rather than inventing a new one:
+`OSINT_STATE`/`OSINT_LOCK` track one run at a time (a 409 blocks a
+second run while one is in flight - deliberately serialized, not
+queued, given how little RAM headroom this Pi has to spare for two
+concurrent scans), `/api/osint/run` starts a background thread and
+returns immediately, `/api/osint/status` is polled every 3s from the
+frontend while running and once more on tab load to pick up whatever
+the last run left behind. Each tool's invocation lives in
+`_OSINT_TOOLS` as a `(argv, stdin)` builder - `_osint_arg` for tools
+that take the target as a trailing argv element, `_osint_stdin` for the
+tomnomnom-style tools (waybackurls, httprobe, httpx) that read it from
+stdin instead. All subprocess calls use list-form argv (no
+`shell=True`), so the target text can't reach a shell regardless of
+what characters it contains. Output is captured (stdout + stderr),
+truncated to 20,000 characters if a tool is especially chatty, and a
+180s timeout guards against a hung/slow lookup (maigret and
+theHarvester in particular can take a while against a real target).
+
+`recon-ng` and `sn0int` are deliberately **not** on this page - both
+are interactive consoles/module frameworks, not oneshot CLIs, and
+wiring either one up would mean scripting their own module-invocation
+syntax rather than just running a command and capturing output. Still
+usable over SSH as before; a scripted variant is a separate future
+task if wanted.
+
+**Verification**: `python3 -m py_compile app.py` and `node --check
+static/app.js` both clean. Built an isolated venv (this sandbox has no
+Flask installed globally) and exercised every new endpoint through
+Flask's real test client: tool list returns all 14 oneshot tools,
+an unknown tool and an empty target both correctly 400, starting a run
+returns 200, a second run attempted while the first is still in flight
+correctly 409s, and - since the actual tool binaries don't exist in
+this sandbox - confirmed the `FileNotFoundError` path resolves cleanly
+into a readable "Tool binary not found: ..." message with
+`returncode: -1` rather than crashing the request or leaving the lock
+stuck on `running: true`. Beyond that, ran the real Flask app under
+Playwright against headless Chromium on a real browser session: logged
+in, opened the drawer, clicked into OSINT TOOLS, confirmed all 14 tools
+populate the dropdown, confirmed the target placeholder updates when
+the tool selection changes, ran a tool end-to-end and watched the
+status line go from "Starting..." to "Running sherlock on
+testuser123..." to "Finished with errors (exit -1)", with the output
+box showing the real captured message and picking up the `.log-box
+error` class exactly as designed. Diffed the full tree against the
+last committed tarball - confirmed exactly `app.py`, `static/app.js`,
+`static/style.css`, and `templates/index.html` changed.
+
+**Not verified, and can't be from here**: real output from any of the
+14 tools against a real target (this sandbox can't reach the actual
+binaries or the network they'd hit) - ask the user to redeploy, pick
+sherlock or holehe against their own username/email first (fastest,
+clearest output), and confirm the RUN button, polling, and both the
+success and failure display paths look right on their real phone.
