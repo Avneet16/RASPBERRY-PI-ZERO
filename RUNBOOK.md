@@ -2553,3 +2553,57 @@ changed (`static/style.css` untouched this time, no new CSS needed).
 for each tool's description is exactly what the user wants once they
 see all 14 side by side on their real phone - easy to tweak in
 `_OSINT_TOOLS` if any read oddly in practice.
+
+## Phase 20 — OSINT toolkit removed (RAM pressure on other services)
+
+**Ask**: after testing the toolkit through the Phase 19/19a dashboard
+tab, user asked to uninstall it - the venvs, Go binaries, and Rust
+toolchain installed for it were adding to memory pressure that the
+Pi's actually-important services (AdGuard, Unbound, Tailscale,
+Vaultwarden) need. Asked whether to also remove the now-dead dashboard
+tab rather than leave it pointing at binaries that no longer exist -
+user chose to remove it.
+
+**What changed (dashboard)**: `app.py`, `static/app.js`,
+`static/style.css`, and `templates/index.html` all reverted to their
+exact Phase 18 state - the entire `_OSINT_TOOLS`/`OSINT_STATE`/
+`OSINT_LOCK`/`_run_osint_tool`/`/api/osint/*` block removed from
+`app.py` (along with the now-unused `import traceback`), the OSINT
+TOOLS nav button and `#tab-osint` markup removed from `index.html`,
+the `loadOsintTab`/`runOsintTool`/`pollOsintStatus` functions and
+`osint` tab-order/title entries removed from `app.js`, and the
+`.log-box.error` rule removed from `style.css` (nothing else uses it).
+
+**What to remove on the Pi itself** (not part of this repo/tarball -
+these were installed directly, per the Phase 19 ask):
+```bash
+rm -rf ~/osint-tools ~/theharvester-venv ~/go
+rm -rf ~/recon-ng ~/theHarvester ~/Photon
+rm -rf ~/.cargo ~/.rustup
+sudo apt remove -y golang nmap exiftool tor libsodium23 libopenblas0 libopenjp2-7
+sudo apt autoremove -y
+```
+A reboot afterward is worth doing too - the elevated swap usage seen
+while testing (51.2%, 553/1080MB) is very likely leftover pages from
+the earlier Go/Rust compiles that Linux has no reason to reclaim on its
+own until something else needs that memory; a reboot clears it
+outright rather than waiting for pressure to force it back down
+naturally.
+
+**Verification**: `python3 -m py_compile app.py` and `node --check
+static/app.js` both clean. `grep -rn "osint\|OSINT"` across all four
+files returned nothing, confirming a complete removal, not just the
+UI-visible parts. Extracted the Phase 18 tarball straight from that
+commit (`git show 6b2392f:pi-control.tar.gz`) and diffed it against
+the reverted working tree directly (not just against my own memory of
+what Phase 18 looked like) - byte-for-byte identical aside from a
+stray `__pycache__` directory from the compile check, which was
+deleted before repackaging. This is a stronger check than the usual
+"diff against last commit" - it confirms the revert didn't just remove
+the OSINT code but landed on the exact same file contents Phase 18
+shipped, not some close-but-not-identical approximation.
+
+**Not verified, and can't be from here**: that the Pi-side `rm`/`apt
+remove` commands above actually ran and that swap/RAM pressure
+actually dropped afterward - ask the user to run them, reboot, and
+check the SYSTEM DETAILS tab's swap/RAM numbers again once back up.
