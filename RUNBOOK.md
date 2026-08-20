@@ -2516,3 +2516,40 @@ binaries or the network they'd hit) - ask the user to redeploy, pick
 sherlock or holehe against their own username/email first (fastest,
 clearest output), and confirm the RUN button, polling, and both the
 success and failure display paths look right on their real phone.
+
+## Phase 19a — Per-tool description + example on the OSINT TOOLS tab
+
+**Ask**: after Phase 19 shipped, user asked for a short description of
+each OSINT tool right on the page (what it checks/shows) plus an
+example of what to type into the target field - so picking the right
+tool and knowing its input format doesn't require going back to chat
+or guessing from the tool name alone.
+
+**What changed**: `_OSINT_TOOLS` (`app.py`) gained `description` and
+`example` strings per tool - what it does/what it returns for
+`description`, a concrete sample value (a username, an email, a bare
+domain, or a full URL depending on the tool) for `example`, both
+included in `/api/osint/tools`'s response. A new `.sub` block
+(`#osint-tool-desc`) sits between the tool `<select>` and the target
+`<input>`, updated by the same `onchange` handler that already sets
+the input's placeholder - picking a tool now shows both what it does
+and what to type in it, not just an empty input with a one-word hint.
+
+**Verification**: `python3 -m py_compile app.py` and `node --check
+static/app.js` both clean. Confirmed via Flask's real test client that
+all 14 tools carry non-empty `description`/`example` fields in the API
+response. Ran the real Flask app under Playwright again: opened the
+OSINT TOOLS tab, confirmed Sherlock's description/example render by
+default, switched the dropdown to httpx and confirmed both the
+description text and the placeholder update together, and
+screenshotted the result to eyeball the layout - description text
+wraps cleanly under the dropdown, the bolded "Example:" line reads
+clearly against the dark theme, nothing overlaps the input or button
+below it. Diffed the full tree against the last committed tarball -
+confirmed exactly `app.py`, `static/app.js`, and `templates/index.html`
+changed (`static/style.css` untouched this time, no new CSS needed).
+
+**Not verified, and can't be from here**: whether the chosen wording
+for each tool's description is exactly what the user wants once they
+see all 14 side by side on their real phone - easy to tweak in
+`_OSINT_TOOLS` if any read oddly in practice.
