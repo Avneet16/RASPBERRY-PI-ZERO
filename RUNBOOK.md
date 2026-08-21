@@ -2607,3 +2607,68 @@ shipped, not some close-but-not-identical approximation.
 remove` commands above actually ran and that swap/RAM pressure
 actually dropped afterward - ask the user to run them, reboot, and
 check the SYSTEM DETAILS tab's swap/RAM numbers again once back up.
+
+## Phase 20 — Vaultwarden restored (native binary), added to ACTIVE SERVICES, and a real layout bug fixed
+
+**Context**: separately from dashboard work, Vaultwarden was reinstalled
+on the Pi as a native binary (not Docker) at `/opt/vaultwarden`,
+systemd-managed (`vaultwarden.service`), fronted by nginx on port 9443
+(Tailscale-only, no basic auth - deliberate, so official Bitwarden
+clients don't need extra config to handle a Basic Auth challenge before
+reaching Vaultwarden's own login). After a long detour through two
+empty/abandoned test accounts and a stale `config.json` silently
+overriding a freshly-set `ADMIN_TOKEN` environment variable (Vaultwarden
+persists `DOMAIN`/`SIGNUPS_ALLOWED`/`ADMIN_TOKEN` into `data/config.json`
+once ever changed via the admin panel, and that file wins over the env
+var from then on), the real vault (119 entries) was found in an
+encrypted `.tar.gz.enc` Google Drive backup the user had separately, per
+their own written restore guide - decrypted via `openssl enc -d
+-aes-256-cbc -pbkdf2`, verified (`PRAGMA integrity_check`, real cipher
+count) before being copied into place. `vaultwarden.service` was already
+in the app's `SERVICES` list (`app.py`), so once the systemd unit
+existed, it started showing up in the ACTIVE SERVICES grid automatically
+- no dashboard code needed for basic status monitoring.
+
+**What changed here**: two things, both in the frontend only (no Python
+changes this phase).
+
+1. **A real pre-existing layout bug, unrelated to Vaultwarden**: the
+   RESTART button on each ACTIVE SERVICES row used `style="float:right"`
+   (`static/app.js`). A float's wrap position depends on how much room
+   the preceding inline text leaves on that line - for short labels
+   (Nginx, UFW) the button landed beside the name; for longer ones
+   (AdGuard, Unbound, Vaultwarden, Tailscale, Fail2Ban) it wrapped below
+   instead, next to the mem-usage line. Caught from a real screenshot the
+   user sent showing the inconsistency directly. Fixed by replacing the
+   float with an explicit flex row (`.service-box-top`, `.service-box-actions`
+   in `static/style.css`) - label+dot pinned left, action button(s)
+   pinned right, on the same line regardless of label length.
+2. **A Vaultwarden-specific OPEN button**, added into that same flex row
+   only for `s.unit === 'vaultwarden'`, opening `VAULTWARDEN_URL`
+   (`https://anon.tail8dd783.ts.net:9443`, a new top-of-file constant in
+   `static/app.js`) in a new tab via `window.open` - not embedded via
+   iframe, a deliberate choice from earlier in this phase (a password
+   vault relaxing its `frame-ancestors`/`X-Frame-Options` to allow
+   framing is a real, if modest, security tradeoff the user chose to
+   avoid). The user separately installed Vaultwarden's own web-vault as
+   its own PWA icon for day-to-day access; this button is a secondary
+   quick-link/fallback, not the primary access path.
+
+**Verification**: `node --check static/app.js` clean. Since the real
+`SERVICES` list renders unconditionally regardless of whether
+`systemctl`/`sudo` succeed (this sandbox has neither), verified the
+layout fix directly by running the real Flask app under Playwright on a
+390&times;900 mobile viewport and screenshotting the ACTIVE SERVICES
+card: all seven rows (AdGuard, Unbound, Vaultwarden, Tailscale, Nginx,
+UFW, Fail2Ban) now show label+dot flush left and button(s) flush right
+on one consistent line regardless of label length, and Vaultwarden's row
+shows both OPEN and RESTART side by side as designed. Diffed the full
+tree against the last committed tarball - confirmed exactly
+`static/app.js` and `static/style.css` changed, nothing else.
+
+**Not verified, and can't be from here**: that `window.open(...)` to a
+different-origin Tailscale HTTPS URL actually hands off to the installed
+Vaultwarden PWA on the user's phone rather than opening a plain browser
+tab (OS/browser-dependent behavior, can't observe from this sandbox) -
+ask the user to tap OPEN from their phone and see which one happens; either
+is a fine outcome, just worth knowing which.
