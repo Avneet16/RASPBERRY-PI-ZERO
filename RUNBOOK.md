@@ -2672,3 +2672,55 @@ Vaultwarden PWA on the user's phone rather than opening a plain browser
 tab (OS/browser-dependent behavior, can't observe from this sandbox) -
 ask the user to tap OPEN from their phone and see which one happens; either
 is a fine outcome, just worth knowing which.
+
+## Phase 20a — Phase 20's flex fix overflowed the card on a real device; fixed properly
+
+**What went wrong**: Phase 20's screenshot-based verification passed in
+this sandbox but the user's real phone showed the ACTIVE SERVICES row
+overflowing straight off the right edge of the page for Vaultwarden's
+row (name + OPEN + RESTART). Root cause: `#services` used the shared
+`.grid2` (2-column) class, and this sandbox's headless Chromium has no
+real "Courier New" installed - it silently substitutes a narrower
+fallback monospace font, so a label+button combination that just barely
+fit in *this* environment's substitute font genuinely didn't fit in the
+real "Courier New" (or whatever the phone actually renders) at half a
+phone-screen's width. The flex-vs-float fix itself was correct; the
+2-column width budget it was squeezed into wasn't.
+
+**Fix**: gave `#services` its own dedicated `.services-grid` class
+(single column, not the shared `.grid2`) in `templates/index.html` /
+`static/style.css` - a name plus up to two buttons now gets the full
+card width instead of half of it. Also added `min-width: 0` to the
+label span inside `.service-box-top` as defense-in-depth, so if some
+future label+button combination still doesn't fit even at full width,
+it can shrink/wrap instead of forcing the row past the card's edge
+again.
+
+**Verification, done differently this time on purpose**: a visual
+screenshot alone is exactly what missed this bug last phase because of
+the sandbox's font substitution, so this time verified with actual
+layout measurements instead of eyeballing pixels - loaded the real app
+under Playwright at three real device widths (360px, 390px, 412px,
+covering the common Android/iPhone range), forced a deliberately
+different stress-test monospace font
+(`document.body { font-family: 'DejaVu Sans Mono' }`, distinct from
+whatever this sandbox's default fallback was) to avoid relying on the
+same substitute font that hid the bug the first time, then asserted
+`document.body.scrollWidth <= window.innerWidth` (zero page-level
+horizontal overflow) and that the Vaultwarden row's bounding box
+(name + OPEN + RESTART, the tightest row) sits fully inside its card's
+bounding box. All three widths passed cleanly. Also took a full-page
+screenshot at 390px for a final visual sanity check - matches the
+intended design, no overlapping/clipped elements. Diffed the full tree
+against the last committed tarball - confirmed exactly
+`templates/index.html` and `static/style.css` changed this time,
+`static/app.js` untouched (the JS template structure from Phase 20 was
+correct all along; only the grid width needed to change).
+
+**Not verified, and can't be from here**: pixel-exact match against the
+real device's actual font rendering (still can't install the user's
+exact real "Courier New" substitute in this sandbox) - but the
+single-column width budget is now generous enough (a full card width
+vs. half of one) that this should be robust regardless of exact font
+metrics. Ask the user to confirm on their real phone once more before
+considering this fully closed.
