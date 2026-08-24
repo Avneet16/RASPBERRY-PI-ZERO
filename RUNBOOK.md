@@ -3043,3 +3043,47 @@ FEELS LIKE / UV INDEX / MORE CONDITIONS / TODAY / AIR QUALITY all show
 real numbers, not a card full of `'--'` - if any section is blank, that
 points at a rejected field name in that specific helper's `current=`
 list, not a network/firewall issue (same lesson as Phase 22a).
+
+## Phase 23a — Edge-swipe-open drawer was losing to Android's own back gesture
+
+**What went wrong**: Phase 22's edge-swipe-to-open-drawer worked in this
+sandbox's Playwright checks but not on the real phone - swiping from the
+left edge triggered Android's system back gesture instead of opening the
+drawer. Root cause is a real platform constraint, not a bug in the
+touch-handling logic: Android's full-screen gesture navigation (the
+edge-swipe-back introduced in Android 10) reserves a hot zone right at
+the screen edge - by default around 24dp, wider on "high" back-gesture
+sensitivity - and intercepts any touch starting inside it *before* it
+ever reaches the browser's JS. This happens even for an installed,
+standalone-display-mode PWA (confirmed the concern flagged as unverified
+in Phase 22's writeup); there's no web platform API to opt a page out of
+it, unlike native apps which can call
+`Window.setSystemGestureExclusionRects()`. The old `EDGE_SWIPE_PX = 24`
+(`static/app.js`) put our own trigger zone exactly inside that same OS
+hot zone.
+
+**Fix**: widened `EDGE_SWIPE_PX` from 24 to 56 - past where Android's
+default (and most non-"high") back-gesture zones end, so the touch
+actually lands on the page instead of being swallowed by the OS gesture
+recognizer first. Not a guaranteed fix for every device/sensitivity
+combination (a user with "high" back-gesture sensitivity set system-wide
+could still lose some of this range) - the 3-dot button remains the
+always-reliable fallback, and lowering Android's own back-gesture
+sensitivity (Settings > System > Gestures > System navigation > Back
+sensitivity) is the user-side lever if it's still getting eaten.
+
+**Verification**: `node --check` clean. Extended the Phase 22 Playwright
+suite with a new case at x=40 - past the old 24px cutoff but inside the
+new 56px one - confirming it now opens the drawer where it wouldn't
+have before; re-ran the existing x=10 (still inside both zones) and
+x=200 (non-edge, unaffected) cases alongside it, all passing. Diffed the
+full tree against the last committed tarball - confirmed exactly one
+line changed in `static/app.js`, nothing else.
+
+**Not verified, and can't be from here**: whether 56px actually clears
+the real phone's specific back-gesture zone (that's a per-device/
+per-sensitivity-setting value this sandbox can't observe) - ask for
+another real-device check; if it's still losing to the system gesture,
+the next lever is widening `EDGE_SWIPE_PX` further, at the cost of
+absorbing more of what would otherwise be a "previous tab" swipe on the
+far left of the screen.
