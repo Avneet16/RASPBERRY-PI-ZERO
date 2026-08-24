@@ -2954,3 +2954,92 @@ changed, nothing else.
 the displayed coordinates actually shift on a real position change
 (only synthetic/mocked data was exercised here) - worth a glance next
 time you're somewhere new.
+
+## Phase 23 — WEATHER expanded: feels-like/UV, more current conditions, today's forecast, air quality
+
+**Context**: after confirming Phase 22/22a's location fix worked, asked
+what else could be shown alongside weather. Given the answer, the user
+picked all of it - a genuinely large addition to one card.
+
+**What changed**, all in `app.py`/`static/app.js`/`static/style.css`/
+`templates/index.html`:
+
+1. **Two new Open-Meteo helpers, deliberately kept as SEPARATE HTTP
+   requests from the original working one** (`app.py`):
+   - `_weather_extra(lat, lon)` - a second `api.open-meteo.com/v1/forecast`
+     call for `apparent_temperature` (feels-like), `uv_index`,
+     `cloud_cover`, `precipitation`, `surface_pressure`,
+     `wind_direction_10m` (converted to a 16-point compass label via new
+     `_wind_compass()`), `wind_gusts_10m`, `is_day`, plus `daily=` for
+     `sunrise`/`sunset`/today's high-low/rain-probability/max-UV.
+   - `_air_quality(lat, lon)` - Open-Meteo's separate, still-free,
+     still-keyless Air Quality API (different host) for PM2.5, PM10, US
+     AQI (+ text label via new `_us_aqi_label()`), ozone, NO2.
+   - Kept as two extra calls instead of folding everything into the
+     original `current=` list on purpose: if any of these newer field
+     names turns out wrong/renamed, Open-Meteo 400s the *whole* request
+     with no `"current"` key in the response - the existing code already
+     turns that into a total `502` (`json.loads(...)["current"]` inside a
+     bare `try/except`). Isolating the new fields into their own
+     calls means a bad field name there only costs those extras
+     (fall back to `'--'`), never the temp/humidity/condition/wind
+     reading that's been solid since Phase 13. Both new helpers follow
+     the same additive, fails-to-`None`-not-broken pattern as
+     `_reverse_geocode`.
+   - `/api/weather`'s response now spreads `_weather_extra(...)`'s dict
+     into the top level and adds `air_quality` as a nested object.
+2. **WEATHER card restructured** (`templates/index.html`) using the same
+   `.group-label` sub-section pattern UNBOUND INTERNALS already
+   established (Phase 16-18) for organizing a lot of related stats in one
+   card without it turning into a wall of numbers: the original
+   CONDITION/TEMP/HUMIDITY/WIND stays as the lead row, then FEELS LIKE /
+   UV, MORE CONDITIONS (cloud cover, precipitation, pressure, wind gust),
+   TODAY (sunrise, sunset, high/low, rain chance / max UV), and AIR
+   QUALITY (US AQI + a text severity label, PM2.5/PM10).
+3. **Small integrated tweaks instead of new fields for their own sake**
+   (`static/app.js`): `is_day` appends `" (Night)"` to the CONDITION text
+   rather than getting its own box; wind direction appends the compass
+   label straight onto the existing WIND value (`"3.8 km/h NE"`) instead
+   of a separate field. US AQI is color-coded green/orange/pink using the
+   same 3-tier `className` pattern already established for Unbound's
+   cache hit rate (Phase 17) - green ≤50 (Good), orange ≤150, pink above
+   that, with the exact US AQI category name shown as a caption
+   underneath. Every new field falls back to `'--'`/`'--:--'` independently
+   if its underlying call didn't come back, same philosophy as the
+   existing HUMIDITY/WIND fallbacks.
+4. New `.big.orange` CSS rule (`static/style.css`) - `.big.green`/
+   `.big.pink` already existed from the hit-rate work, orange was
+   missing.
+
+**Verification**: `node --check`/`ast.parse` clean on all four files. Ran
+the real Flask app under Playwright (fresh setup-mode signup, service
+worker registration disabled the same way as Phase 22) and drove it
+through four scenarios via mocked `/api/weather` responses: full data
+with a bad AQI (210, "Very Unhealthy") - confirmed every new field
+renders correctly, the night suffix appears, wind shows its compass
+direction, and the AQI number is colored pink; full data with a good AQI
+(32) and `is_day: true` - confirmed green coloring and no night suffix;
+and both new secondary calls entirely absent from the response (as if
+`_weather_extra`/`_air_quality` both failed) - confirmed every new field
+degrades to `'--'`/`'--:--'` independently with no page error, and
+critically that the ORIGINAL core fields (temp/condition, proven since
+Phase 13) are completely unaffected by the new calls failing. Re-ran the
+full Phase 22 regression suite (AdGuard OPEN button, weather coords,
+edge-swipe drawer, tab wraparound) unchanged and passing. Took a real
+screenshot of the rendered card at 390px to confirm no overflow/layout
+regression (the exact bug class from Phase 20a) - clean. Diffed the full
+tree against the last committed tarball - confirmed exactly `app.py`,
+`static/app.js`, `static/style.css`, and `templates/index.html` changed,
+nothing else.
+
+**Not verified, and can't be from here**: the real *live* round trip for
+`_weather_extra`/`_air_quality` (same sandbox network restriction as
+Phase 22 - only mocked responses were exercised) - specifically whether
+every field name used here (`uv_index`, `cloud_cover`, `is_day`, etc.) is
+actually accepted by Open-Meteo's current API version, since that's
+exactly the class of failure (BigDataCloud's redirect) that bit Phase 22
+silently. Ask for a WEATHER refresh on the real device and check that
+FEELS LIKE / UV INDEX / MORE CONDITIONS / TODAY / AIR QUALITY all show
+real numbers, not a card full of `'--'` - if any section is blank, that
+points at a rejected field name in that specific helper's `current=`
+list, not a network/firewall issue (same lesson as Phase 22a).
