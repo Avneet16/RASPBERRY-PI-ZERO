@@ -2796,3 +2796,90 @@ real scheduled run (only manually invoked so far); whether Quad9-over-TLS
 DNS forwarding (605ms+ average recursion, per Phase 18's stats panel) is
 something the user wants to keep running long-term or revert - left as
 an open, no-rush decision for the user, not a bug.
+
+## Phase 22 — Five small dashboard fixes: weather location proof, AdGuard OPEN, a real alert-flapping bug, and two swipe gestures
+
+**What changed**, all in `app.py`/`static/app.js` only:
+
+1. **WEATHER now shows *where* it thinks you are, not just that it thinks
+   it knows.** The "Your current location" label was always that exact
+   fixed string regardless of whether the browser's geolocation actually
+   got picked up correctly - no way to eyeball whether it was right. New
+   `_reverse_geocode()` in `app.py` turns the lat/lon into a city/country
+   name via BigDataCloud's free, keyless reverse-geocode endpoint (same
+   additive-only, fails-to-`None`-not-broken pattern as `_geolocate_ip`
+   from Phase 13), returned from `/api/weather` as `location_label`.
+   `static/app.js` appends it to the existing label:
+   `"Your current location — Austin, United States"` (or `"Saved
+   location — ..."` for the IP-fallback path), falling back to the bare
+   label with no dangling dash when the geocode lookup itself fails.
+2. **AdGuard gets the same OPEN button Vaultwarden got in Phase 20.**
+   `VAULTWARDEN_URL` generalized into a `SERVICE_OPEN_URLS` unit→URL map
+   (`vaultwarden` → `:9443`, `AdGuardHome` → `:9442`, the same Tailscale
+   cert host both already sit behind per Phase 8p/11) and the service-row
+   template now looks the URL up by unit instead of a single hardcoded
+   `===` check - one login away from AdGuard's admin UI instead of typing
+   the URL by hand. AdGuard's vhost still has nginx Basic Auth in front of
+   it (Phase 7a/8p), so OPEN prompts for that the first time, same as
+   navigating there manually.
+3. **The Proton kill-switch alert was flapping - a real bug, not a
+   config issue.** `proton_up` comes from `_proton_status()`, which shells
+   out via `sudo` on every ~8s `_sample_net` poll - exactly the same class
+   of occasional-timeout blip Phase-something's `ALERT_CONFIRM_POLLS`
+   streak guard already exists to absorb for service-down and
+   stale-handshake checks, except the killswitch check was never given
+   that same treatment and fired on a single bad poll with zero debounce:
+   one transient "proton read as down" immediately followed by "back up" a
+   few seconds later, sent as two back-to-back Telegram messages
+   (`ALERT: exit node active...` then `kill-switch condition cleared`)
+   with nothing real having changed. Fixed by giving it the identical
+   `_ALERT_PENDING`/streak pattern the other two checks already use -
+   requires the SAME reading on `ALERT_CONFIRM_POLLS` (2) consecutive
+   polls before treating it as a real transition. A genuine sustained
+   Proton outage still alerts (and still clears) correctly, just ~8-16s
+   slower than before - the false single-poll blips are what's gone.
+4. **Swipe-from-the-left-edge now opens the nav drawer**, the standard
+   mobile-app convention, instead of needing the 3-dot button every time.
+   A touch starting within `EDGE_SWIPE_PX` (24px) of the screen's left
+   edge is now treated as "open the drawer" and takes priority over the
+   existing tab-swipe-right ("previous tab") gesture in that same zone,
+   regardless of which tab is active.
+5. **Tabs wrap around at both ends.** Swiping forward from SECURITY (the
+   last tab) now goes to OVERVIEW instead of stopping dead at the edge,
+   and swiping backward from OVERVIEW goes to SECURITY - `Math.min`/
+   `Math.max` clamping replaced with modulo wraparound in the same
+   touch-end handler edge-swipe was added to.
+
+**Verification**: `node --check`/`ast.parse` clean on both files. Ran the
+real Flask app (fresh sqlite DB through actual setup-mode signup, not a
+mock) under Playwright at a 390px mobile viewport with `has_touch` and
+geolocation permissions granted, service-worker registration disabled via
+an init script (it was intercepting `fetch()` ahead of Playwright's route
+mocking otherwise) - confirmed the ACTIVE SERVICES grid's rendered HTML
+contains both the AdGuard (`:9442`) and Vaultwarden (`:9443`) OPEN URLs;
+mocked `/api/weather` responses via `page.route` and confirmed
+`#weather-source` renders `"Your current location — Austin, United
+States"` with a label present and falls back to the bare `"Saved
+location"` (no stray dash) when `location_label` is `null`; dispatched
+real synthetic `TouchEvent`s and confirmed an edge-originated rightward
+swipe opens the drawer while an identical swipe starting mid-screen
+doesn't, and that a forward swipe from SECURITY lands on OVERVIEW while a
+backward swipe from OVERVIEW lands on SECURITY. Separately, unit-tested
+the killswitch debounce logic in isolation (extracted the exact new code
+block, drove it through synthetic poll sequences): a single-poll blip
+produces zero alerts, while a genuine 2-poll-sustained change still
+alerts and still clears. Diffed the full tree against the last committed
+tarball - confirmed exactly `app.py` and `static/app.js` changed, nothing
+else.
+
+**Not verified, and can't be from here**: this sandbox's outbound network
+is proxy-restricted to an allowlist that doesn't include
+`api.open-meteo.com`/`api.bigdatacloud.net`, so the *real* live
+reverse-geocode call was verified via a mocked response rather than an
+actual round trip - ask for a WEATHER refresh on the real device and
+confirm the city/country shown genuinely matches where the phone is
+before considering this fully closed. Also can't observe here whether an
+edge-swipe conflicts with the OS/browser's own edge-swipe-back gesture on
+the user's specific phone/browser - less of a concern given pi-control
+already runs installed as a standalone PWA (Phase 10), where that
+system gesture is typically absent, but worth a real-device check.
