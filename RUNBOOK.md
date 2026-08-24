@@ -2724,3 +2724,75 @@ single-column width budget is now generous enough (a full card width
 vs. half of one) that this should be robust regardless of exact font
 metrics. Ask the user to confirm on their real phone once more before
 considering this fully closed.
+
+## Phase 21 — Encrypted automated backups, SSH/firewall hardening, and Vaultwarden mobile-app compatibility
+
+**Context**: separately from dashboard work, three infra efforts this
+phase, all outside `pi-control`'s own codebase.
+
+1. **Automated encrypted backups.** New `/usr/local/bin/pi-backup.sh`
+   (systemd `pi-backup.service` + `pi-backup.timer`, daily 03:30 with a
+   10-minute randomized delay) backs up each service's config/data as a
+   separate per-component tarball (`vaultwarden`, `adguard`, `unbound`,
+   `tailscale`, `protonvpn`, `nginx`, `networkmanager`, `fail2ban_ufw`,
+   `picontrol_data`, `systemd_units`, `custom_scripts`), encrypts each
+   with `openssl enc -aes-256-cbc -pbkdf2`, and pushes only the
+   components that actually changed to a new private GitHub repo
+   (`Pi-zero-backups`) via a repo-scoped SSH deploy key. Change detection
+   hashes the plaintext tarball (sha256, stored in `/root/.backup-state/`)
+   rather than the ciphertext, since `-pbkdf2`'s random per-run salt
+   makes ciphertext non-comparable across runs even when the underlying
+   data is identical. Vaultwarden's component brackets its tar step with
+   `systemctl stop`/`start` for a WAL-consistent sqlite snapshot. A full
+   `RESTORE.md` (setup checklist + disaster-recovery playbook) was
+   committed alongside it. The backup passphrase and deploy key live in
+   the user's separate cloud Bitwarden account, deliberately not in the
+   self-hosted Vaultwarden this same backup protects (would be a circular
+   single point of failure).
+2. **SSH/firewall/sudoers audit.** Removed a leftover
+   `/etc/sudoers.d/90-cloud-init-users` granting a real user passwordless
+   full sudo; added `/etc/ssh/sshd_config.d/99-hardening.conf`
+   (`X11Forwarding no`, `AllowTcpForwarding no`, `AllowAgentForwarding
+   no`, `LoginGraceTime 30`). Confirmed the WiFi AP had no security
+   config at all (fully open, not just weak) and set WPA2 on it. Along
+   the way, confirmed a real but ultimately benign gotcha: Tailscale's
+   own `ts-input` iptables/nftables chain is evaluated before UFW's
+   chains and unconditionally accepts everything on `tailscale0`, so
+   UFW's tailscale0-scoped rules never actually run for that interface -
+   not a hole, since Tailscale's own device auth is the real gate there,
+   but worth knowing UFW isn't what's protecting SSH-over-Tailscale.
+   Confirmed SSH is still genuinely blocked by UFW's default-deny on
+   `eth0`/`wlan0`.
+3. **Vaultwarden + official Bitwarden mobile app.** Getting the official
+   Bitwarden Android app working against this self-hosted server needed
+   two fixes: switching nginx's Vaultwarden vhost to the real
+   Tailscale-issued cert (`monitor.crt`/`.key`, the same shared cert from
+   Phase 10/11) instead of a self-signed one, then - once that still left
+   the app failing to create/sync entries with a client-side
+   `kotlinx.serialization.json.JsonDecodingException` even though
+   `/api/sync` returned clean `200 OK` server-side - upgrading Vaultwarden
+   itself from 1.35.7 to 1.37.2 to close an API/serialization drift
+   between an older server and a newer official client. No pre-built ARM
+   binary was available for that version, so it was cross-compiled from
+   source on the user's Windows PC via the same `cross`+Docker pipeline
+   proven earlier in this project (see the sn0int build effort), this
+   time also requiring `--features "sqlite,vendored_openssl"` since
+   Vaultwarden's `Cargo.toml` ships with both the sqlite backend and a
+   vendored-OpenSSL fallback disabled by default. The new binary was
+   transferred over, swapped into `/opt/vaultwarden/vaultwarden` (old
+   binary kept alongside as `.old-1.35.7` for rollback), and the service
+   restarted against the existing real database - Vaultwarden ran its own
+   schema migrations automatically. Confirmed working end-to-end: the
+   official Android app now syncs and displays all 119 real entries, and
+   creating a new entry no longer throws.
+
+**What changed in this repo**: nothing in `pi-control`'s own code -
+this phase is infra/ops work living outside the Flask app, logged here
+for a continuous record of the Pi's state alongside the dashboard's own
+history.
+
+**Not verified, and can't be from here**: the backup timer's first
+real scheduled run (only manually invoked so far); whether Quad9-over-TLS
+DNS forwarding (605ms+ average recursion, per Phase 18's stats panel) is
+something the user wants to keep running long-term or revert - left as
+an open, no-rush decision for the user, not a bug.
