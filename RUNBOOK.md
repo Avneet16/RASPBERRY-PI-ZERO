@@ -2924,3 +2924,33 @@ is permanent (this domain migration sticking) or something that could
 flip back/change again later - if WEATHER's location label silently goes
 blank again in the future, check for another redirect/response-shape
 change at that URL before assuming it's a network issue again.
+
+## Phase 22b — Lat/lon shown alongside the WEATHER location label
+
+**Context**: confirmed working on the real device ("Your current
+location — Dadri, India"). Follow-up ask: show the raw coordinates too,
+so a location change is visible directly (a moved-but-nearby point can
+round to the same city name, and the reverse-geocode label can lag a
+real move) rather than only trusting the city/country text.
+
+**What changed**: `/api/weather` (`app.py`) now also returns the `lat`/
+`lon` it actually queried Open-Meteo with (the same values already
+resolved earlier in the function - live browser position or the saved
+fallback), not re-derived client-side. `static/app.js` appends them to
+the existing label at 4 decimal places (~11m resolution - enough to
+visually confirm a real move without needless precision):
+`"Your current location — Dadri, India (28.5535, 77.5540)"`. Falls back
+to no parenthetical at all if `lat`/`lon` are ever absent, same
+defensive pattern as the `location_label` fallback from Phase 22.
+
+**Verification**: `node --check`/`ast.parse` clean. Extended the same
+Playwright harness from Phase 22 with three cases - label + coords
+together, neither present, and coords present with no label - all
+render exactly as expected. Diffed the full tree against the last
+committed tarball - confirmed exactly `app.py` and `static/app.js`
+changed, nothing else.
+
+**Not verified, and can't be from here**: real-device confirmation that
+the displayed coordinates actually shift on a real position change
+(only synthetic/mocked data was exercised here) - worth a glance next
+time you're somewhere new.
