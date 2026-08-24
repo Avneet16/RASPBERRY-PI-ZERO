@@ -2883,3 +2883,44 @@ edge-swipe conflicts with the OS/browser's own edge-swipe-back gesture on
 the user's specific phone/browser - less of a concern given pi-control
 already runs installed as a standalone PWA (Phase 10), where that
 system gesture is typically absent, but worth a real-device check.
+
+## Phase 22a — Phase 22's location label showed nothing on the real Pi; missed a redirect, not a network/firewall issue
+
+**What went wrong**: exactly the risk flagged as unverified in Phase
+22 - on the real device, WEATHER still showed "Saved location" with no
+city/country appended, no error, nothing in `journalctl`. Root cause,
+found by having the user run the same `curl` command from
+`_reverse_geocode()` directly on the Pi: BigDataCloud's
+`api.bigdatacloud.net/data/reverse-geocode-client` endpoint now responds
+with `HTTP/1.1 307 Temporary Redirect` to a new domain
+(`api-bdc.io/data/reverse-geocode-client?...`) instead of the JSON
+directly - a change on their end since this feature was written, not
+anything wrong with this Pi's network/DNS/firewall (all confirmed fine:
+TLS handshake succeeded, correct IP resolved, valid cert). `curl -s`
+without `-L` doesn't follow redirects, so `result.stdout` was an empty
+string every single call; `json.loads("")` threw, was silently caught by
+the existing (deliberately permissive) `except Exception: return None`,
+and produced exactly the same "no label, no error" symptom a real outage
+would - indistinguishable from the outside without the raw `curl` output
+in hand.
+
+**Fix**: one flag. Added `-L` to the `curl` invocation in
+`_reverse_geocode()` (`app.py`) so it follows the redirect. Confirmed via
+the user running `curl -sL ...` directly on the Pi first, before
+shipping the fix, that the redirect target returns the exact JSON field
+names the parsing code already expects (`city`, `locality`,
+`countryName`) - the domain moved, but the response shape didn't, so no
+further parsing changes were needed.
+
+**Verification**: `ast.parse` clean. Diffed the full tree against the
+last committed tarball - confirmed exactly one line changed in `app.py`
+(the `curl` arg list), nothing else. The actual live round-trip was
+verified by the user directly against the real endpoint from the real
+Pi (not mocked, not sandboxed) before this was pushed - stronger
+verification than Phase 22 could manage on its own.
+
+**Not verified, and can't be from here**: whether BigDataCloud's redirect
+is permanent (this domain migration sticking) or something that could
+flip back/change again later - if WEATHER's location label silently goes
+blank again in the future, check for another redirect/response-shape
+change at that URL before assuming it's a network issue again.
